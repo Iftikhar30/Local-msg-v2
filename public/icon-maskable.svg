@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGradMaskable" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#09090b" />
+      <stop offset="50%" stop-color="#18181b" />
+      <stop offset="100%" stop-color="#09090b" />
+    </linearGradient>
+    <linearGradient id="emeraldGradMaskable" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="50%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+
+  <!-- Full bleed background for maskable -->
+  <rect width="512" height="512" fill="url(#bgGradMaskable)" />
+
+  <!-- Center Content scaled within 80% safe zone (center at 256, 256) -->
+  <g transform="translate(51.2, 51.2) scale(0.8)">
+    <circle cx="256" cy="256" r="150" fill="none" stroke="#10b981" stroke-width="6" stroke-dasharray="16 12" opacity="0.4" />
+    <circle cx="256" cy="256" r="100" fill="none" stroke="#10b981" stroke-width="8" opacity="0.6" />
+    
+    <circle cx="256" cy="256" r="44" fill="url(#emeraldGradMaskable)" />
+    <circle cx="256" cy="256" r="20" fill="#ffffff" opacity="0.9" />
+
+    <path d="M 324 188 A 96 96 0 0 1 324 324" fill="none" stroke="url(#emeraldGradMaskable)" stroke-width="16" stroke-linecap="round" />
+    <path d="M 360 152 A 148 148 0 0 1 360 360" fill="none" stroke="url(#emeraldGradMaskable)" stroke-width="14" stroke-linecap="round" opacity="0.75" />
+
+    <path d="M 188 324 A 96 96 0 0 1 188 188" fill="none" stroke="url(#emeraldGradMaskable)" stroke-width="16" stroke-linecap="round" />
+    <path d="M 152 360 A 148 148 0 0 1 152 152" fill="none" stroke="url(#emeraldGradMaskable)" stroke-width="14" stroke-linecap="round" opacity="0.75" />
+  </g>
+</svg>

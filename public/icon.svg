@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#09090b" />
+      <stop offset="50%" stop-color="#18181b" />
+      <stop offset="100%" stop-color="#09090b" />
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="50%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background rounded rect -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  <rect width="510" height="510" x="1" y="1" rx="111" fill="none" stroke="#27272a" stroke-width="2" />
+
+  <!-- Center Glowing Ring Structure -->
+  <circle cx="256" cy="256" r="160" fill="none" stroke="#10b981" stroke-width="6" stroke-dasharray="16 12" opacity="0.4" />
+  <circle cx="256" cy="256" r="110" fill="none" stroke="#10b981" stroke-width="8" opacity="0.6" />
+  
+  <!-- Central Pulse Node -->
+  <circle cx="256" cy="256" r="48" fill="url(#emeraldGrad)" filter="url(#glow)" />
+  <circle cx="256" cy="256" r="24" fill="#ffffff" opacity="0.9" />
+
+  <!-- Wireless WiFi / LAN Waves -->
+  <!-- Top Right Wave -->
+  <path d="M 330 182 A 104 104 0 0 1 330 330" fill="none" stroke="url(#emeraldGrad)" stroke-width="18" stroke-linecap="round" />
+  <path d="M 370 142 A 160 160 0 0 1 370 370" fill="none" stroke="url(#emeraldGrad)" stroke-width="16" stroke-linecap="round" opacity="0.75" />
+
+  <!-- Bottom Left Wave -->
+  <path d="M 182 330 A 104 104 0 0 1 182 182" fill="none" stroke="url(#emeraldGrad)" stroke-width="18" stroke-linecap="round" />
+  <path d="M 142 370 A 160 160 0 0 1 142 142" fill="none" stroke="url(#emeraldGrad)" stroke-width="16" stroke-linecap="round" opacity="0.75" />
+</svg>
