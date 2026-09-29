@@ -1,15 +1,25 @@
-import { Device, ChatMessage, FileTransfer, DeviceType } from '../types';
+import { Device, ChatMessage, FileTransfer, DeviceType, MessageStatus } from '../types';
 
 export interface WebRTCPeerEvents {
+  onPeerDiscovered: (deviceId: string, device: Partial<Device>) => void;
   onPeerConnected: (deviceId: string, device: Partial<Device>) => void;
   onPeerDisconnected: (deviceId: string) => void;
+  onIncomingConnectionRequest: (request: {
+    requestId: string;
+    fromDeviceId: string;
+    fromDeviceName: string;
+    fromDeviceCode?: string;
+    fromDeviceType?: DeviceType;
+    avatar?: string;
+  }) => void;
+  onConnectionResponse: (fromDeviceId: string, accepted: boolean) => void;
   onMessageReceived: (message: ChatMessage) => void;
+  onMessageStatusUpdate: (messageId: string, status: MessageStatus) => void;
+  onConversationReadReceived: (conversationId: string, lastTimestamp: number) => void;
   onTypingStatus: (deviceId: string, isTyping: boolean) => void;
   onFileTransferProgress: (transfer: Partial<FileTransfer>) => void;
   onFileTransferComplete: (transfer: FileTransfer, blob: Blob) => void;
   onClipboardReceived: (senderName: string, text: string) => void;
-  onIncomingConnectionRequest: (fromDevice: { deviceId: string; deviceName: string; deviceCode?: string; deviceType?: DeviceType }) => void;
-  onConnectionResponse: (fromDeviceId: string, accepted: boolean) => void;
   onLatencyUpdate: (deviceId: string, latencyMs: number) => void;
   onSignalingStateChange?: (connected: boolean) => void;
 }
@@ -19,7 +29,7 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: ['stun:global.stun.twilio.com:3478'] },
 ];
 
-const CHUNK_SIZE = 64 * 1024; // 64KB per chunk for optimal WebRTC throughput
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks for optimal WebRTC throughput
 const MAX_BUFFERED_AMOUNT = 512 * 1024; // 512KB backpressure threshold
 
 interface PeerSession {
@@ -29,16 +39,20 @@ interface PeerSession {
   controlChannel?: RTCDataChannel;
   fileChannel?: RTCDataChannel;
   isConnected: boolean;
-  activeTransfers: Map<string, {
-    fileInfo: { id: string; name: string; size: number; type: string; totalChunks: number };
-    chunks: ArrayBuffer[];
-    bytesReceived: number;
-    startTime: number;
-  }>;
+  iceCandidatesQueue: RTCIceCandidateInit[];
+  activeTransfers: Map<
+    string,
+    {
+      fileInfo: { id: string; name: string; size: number; type: string; totalChunks: number };
+      chunks: ArrayBuffer[];
+      bytesReceived: number;
+      startTime: number;
+    }
+  >;
 }
 
 // ---------------------------------------------------------
-// Lightweight Zero-Dependency MQTT 3.1.1 WebSocket Client
+// Zero-Dependency MQTT 3.1.1 WebSocket Signaling Broker
 // ---------------------------------------------------------
 class MqttSignalingClient {
   private ws: WebSocket | null = null;
@@ -62,7 +76,7 @@ class MqttSignalingClient {
     onMessage: (topic: string, payload: any) => void,
     onState?: (connected: boolean) => void
   ) {
-    this.clientId = `ll_${clientId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}_${Math.random().toString(36).slice(2, 6)}`;
+    this.clientId = `ll_${clientId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)}_${Math.random().toString(36).slice(2, 6)}`;
     this.onMessageCallback = onMessage;
     this.onStateCallback = onState;
     this.connect();
@@ -107,7 +121,7 @@ class MqttSignalingClient {
     }
     if (!this.isDestroyed) {
       this.urlIndex++;
-      setTimeout(() => this.connect(), 4000);
+      setTimeout(() => this.connect(), 3500);
     }
   }
 
@@ -131,11 +145,10 @@ class MqttSignalingClient {
     const idBytes = encoder.encode(this.clientId);
     const protoBytes = encoder.encode('MQTT');
 
-    // Variable header (10 bytes) + payload (2 + clientId.length)
     const varHeader = [
       0x00, 0x04, ...protoBytes, // Protocol Name
       0x04, // Protocol Level (MQTT 3.1.1)
-      0x02, // Connect Flags (Clean Session)
+      0x02, // Clean Session
       0x00, 0x3c, // Keep Alive (60s)
     ];
 
@@ -211,16 +224,14 @@ class MqttSignalingClient {
       this.isConnected = true;
       this.onStateCallback?.(true);
 
-      // Resubscribe to all topics
       for (const topic of this.subscriptions) {
         this.subscribe(topic);
       }
 
-      // Start ping heartbeat
       if (this.pingInterval) clearInterval(this.pingInterval);
       this.pingInterval = setInterval(() => {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(new Uint8Array([0xc0, 0x00]).buffer); // PINGREQ
+          this.ws.send(new Uint8Array([0xc0, 0x00]).buffer);
         }
       }, 25000);
     }
@@ -253,7 +264,7 @@ class MqttSignalingClient {
         const payloadJson = JSON.parse(payloadRaw);
         this.onMessageCallback(topic, payloadJson);
       } catch {
-        // non-json message
+        // non-json
       }
     }
   }
@@ -263,7 +274,7 @@ class MqttSignalingClient {
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.ws) {
       try {
-        this.ws.send(new Uint8Array([0xe0, 0x00]).buffer); // DISCONNECT
+        this.ws.send(new Uint8Array([0xe0, 0x00]).buffer);
         this.ws.close();
       } catch {
         // ignore
@@ -273,7 +284,7 @@ class MqttSignalingClient {
 }
 
 // ---------------------------------------------------------
-// Main WebRTC Peer Manager
+// Production WebRTC Manager with strict state & ACK engine
 // ---------------------------------------------------------
 export class WebRTCManager {
   private localProfile: {
@@ -289,6 +300,11 @@ export class WebRTCManager {
   private mqttClient: MqttSignalingClient | null = null;
   private isSignalingConnected = false;
   private isSupported = false;
+
+  // Diagnostics tracking
+  public lastMessageSent?: { id: string; to: string; time: number; status: string };
+  public lastMessageReceived?: { id: string; from: string; time: number };
+  public lastAckReceived?: { id: string; status: string; time: number };
 
   constructor(
     localProfile: { deviceId: string; deviceName: string; deviceType: DeviceType; deviceCode: string; avatar: string },
@@ -311,20 +327,46 @@ export class WebRTCManager {
     return this.isSupported;
   }
 
+  public getSignalingState(): boolean {
+    return this.isSignalingConnected;
+  }
+
+  public isPeerConnected(deviceId: string): boolean {
+    const session = this.peers.get(deviceId);
+    return !!session && session.isConnected && session.controlChannel?.readyState === 'open';
+  }
+
   public getConnectedPeerIds(): string[] {
     const list: string[] = [];
     this.peers.forEach((peer, id) => {
-      if (peer.isConnected) list.push(id);
+      if (peer.isConnected && peer.controlChannel?.readyState === 'open') {
+        list.push(id);
+      }
     });
     return list;
   }
 
-  // 1. Same-device multi-tab / window communication
+  public getActivePeersDiagnostics() {
+    const list: any[] = [];
+    this.peers.forEach((peer, id) => {
+      list.push({
+        deviceId: id,
+        deviceName: peer.deviceInfo.deviceName || 'Peer',
+        connectionState: peer.pc.connectionState,
+        iceState: peer.pc.iceConnectionState,
+        dataChannelState: peer.controlChannel?.readyState || 'none',
+        rttMs: 0,
+      });
+    });
+    return list;
+  }
+
+  // 1. BroadcastChannel for same-origin multi-tab testing
   private initBroadcastChannel() {
     if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
 
     try {
-      this.broadcastChannel = new BroadcastChannel('locallink_p2p_mesh');
+      this.broadcastChannel = new BroadcastChannel('locallink_p2p_mesh_v2');
       this.broadcastChannel.onmessage = (event) => {
         this.handleSignalingMessage(event.data);
       };
@@ -334,7 +376,7 @@ export class WebRTCManager {
     }
   }
 
-  // 2. Public Ephemeral Signaling Broker for distinct Wi-Fi / LAN Devices
+  // 2. MQTT Signaling
   private initMqttSignaling() {
     if (typeof window === 'undefined') return;
 
@@ -356,12 +398,9 @@ export class WebRTCManager {
 
   private subscribeTopics() {
     if (!this.mqttClient) return;
-    // 1. General presence for LAN discovery
-    this.mqttClient.subscribe('locallink/v1/presence');
-    // 2. Direct signaling by Device ID
-    this.mqttClient.subscribe(`locallink/v1/peer/${this.localProfile.deviceId}`);
-    // 3. Direct pairing by 4-digit Code
-    this.mqttClient.subscribe(`locallink/v1/code/${this.localProfile.deviceCode}`);
+    this.mqttClient.subscribe('locallink/v2/presence');
+    this.mqttClient.subscribe(`locallink/v2/peer/${this.localProfile.deviceId}`);
+    this.mqttClient.subscribe(`locallink/v2/code/${this.localProfile.deviceCode}`);
   }
 
   public broadcastPresence() {
@@ -385,14 +424,16 @@ export class WebRTCManager {
     }
 
     if (this.mqttClient) {
-      this.mqttClient.publish('locallink/v1/presence', msg);
+      this.mqttClient.publish('locallink/v2/presence', msg);
     }
   }
 
+  // 3. User Connection Request: Requires Explicit Target Approval
   public async requestConnectByCode(targetCode: string): Promise<boolean> {
     const msg = {
       _locallink_signal: true,
       type: 'connect_request',
+      requestId: `req_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       toDeviceCode: targetCode,
       fromDeviceId: this.localProfile.deviceId,
       fromDeviceName: this.localProfile.deviceName,
@@ -402,11 +443,8 @@ export class WebRTCManager {
       timestamp: Date.now(),
     };
 
-    // Broadcast across tabs
     this.broadcastChannel?.postMessage(msg);
-
-    // Broadcast on MQTT topic for target 4-digit code
-    this.mqttClient?.publish(`locallink/v1/code/${targetCode}`, msg);
+    this.mqttClient?.publish(`locallink/v2/code/${targetCode}`, msg);
     return true;
   }
 
@@ -414,6 +452,7 @@ export class WebRTCManager {
     const msg = {
       _locallink_signal: true,
       type: 'connect_request',
+      requestId: `req_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       toDeviceId: targetDeviceId,
       fromDeviceId: this.localProfile.deviceId,
       fromDeviceName: this.localProfile.deviceName,
@@ -424,7 +463,7 @@ export class WebRTCManager {
     };
 
     this.broadcastChannel?.postMessage(msg);
-    this.mqttClient?.publish(`locallink/v1/peer/${targetDeviceId}`, msg);
+    this.mqttClient?.publish(`locallink/v2/peer/${targetDeviceId}`, msg);
     return true;
   }
 
@@ -442,31 +481,31 @@ export class WebRTCManager {
     };
 
     this.broadcastChannel?.postMessage(msg);
-    this.mqttClient?.publish(`locallink/v1/peer/${targetDeviceId}`, msg);
+    this.mqttClient?.publish(`locallink/v2/peer/${targetDeviceId}`, msg);
 
     if (accepted) {
-      // Start WebRTC connection
-      this.initiatePeerConnection(targetDeviceId, {
-        deviceId: targetDeviceId,
-      });
+      // Receiver accepted: prepares PeerConnection and waits for Offer
+      this.getOrCreatePeerSession(targetDeviceId, { deviceId: targetDeviceId });
     }
   }
 
-  // Handle incoming signaling messages
+  // 4. Handle Incoming Signaling Messages
   public async handleSignalingMessage(data: any) {
     if (!data || !data._locallink_signal) return;
     if (data.fromDeviceId === this.localProfile.deviceId) return; // Ignore self
 
     const isForUs =
-      !data.toDeviceId ||
-      data.toDeviceId === this.localProfile.deviceId ||
-      (data.toDeviceCode && data.toDeviceCode === this.localProfile.deviceCode);
+      !data.toDeviceId && !data.toDeviceCode
+        ? data.type === 'presence'
+        : data.toDeviceId === this.localProfile.deviceId ||
+          (data.toDeviceCode && data.toDeviceCode === this.localProfile.deviceCode);
 
     if (!isForUs) return;
 
     switch (data.type) {
       case 'presence': {
-        this.events.onPeerConnected(data.fromDeviceId, {
+        // MUST ONLY report as discovered! NEVER auto-connect!
+        this.events.onPeerDiscovered(data.fromDeviceId, {
           deviceId: data.fromDeviceId,
           deviceName: data.fromDeviceName,
           deviceType: data.fromDeviceType || 'laptop',
@@ -478,17 +517,37 @@ export class WebRTCManager {
       }
 
       case 'connect_request': {
-        this.events.onIncomingConnectionRequest({
+        // Discovered + prompts incoming permission
+        this.events.onPeerDiscovered(data.fromDeviceId, {
           deviceId: data.fromDeviceId,
           deviceName: data.fromDeviceName,
           deviceCode: data.fromDeviceCode,
           deviceType: data.fromDeviceType,
+          avatar: data.avatar,
+          isOnline: true,
+        });
+
+        this.events.onIncomingConnectionRequest({
+          requestId: data.requestId || `req_${Date.now()}`,
+          fromDeviceId: data.fromDeviceId,
+          fromDeviceName: data.fromDeviceName,
+          fromDeviceCode: data.fromDeviceCode,
+          fromDeviceType: data.fromDeviceType,
+          avatar: data.avatar,
         });
         break;
       }
 
       case 'connect_response': {
         this.events.onConnectionResponse(data.fromDeviceId, data.accepted);
+        if (data.accepted) {
+          // Initiator received acceptance: generate WebRTC Offer
+          this.initiatePeerConnection(data.fromDeviceId, {
+            deviceId: data.fromDeviceId,
+            deviceName: data.fromDeviceName,
+            deviceCode: data.fromDeviceCode,
+          });
+        }
         break;
       }
 
@@ -513,27 +572,25 @@ export class WebRTCManager {
     }
   }
 
-  // 3. WebRTC Peer Connection Life Cycle
-  public async initiatePeerConnection(targetDeviceId: string, peerInfo: Partial<Device>): Promise<RTCPeerConnection> {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  // 5. WebRTC PeerConnection Session Factory
+  private getOrCreatePeerSession(targetDeviceId: string, peerInfo: Partial<Device>): PeerSession {
+    let session = this.peers.get(targetDeviceId);
+    if (session) {
+      session.deviceInfo = { ...session.deviceInfo, ...peerInfo };
+      return session;
+    }
 
-    const session: PeerSession = {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    session = {
       deviceId: targetDeviceId,
       deviceInfo: peerInfo,
       pc,
       isConnected: false,
+      iceCandidatesQueue: [],
       activeTransfers: new Map(),
     };
 
-    const controlChannel = pc.createDataChannel('control', { ordered: true });
-    const fileChannel = pc.createDataChannel('file', { ordered: true });
-    fileChannel.binaryType = 'arraybuffer';
-
-    session.controlChannel = controlChannel;
-    session.fileChannel = fileChannel;
     this.peers.set(targetDeviceId, session);
-
-    this.setupDataChannelEvents(targetDeviceId, controlChannel, fileChannel);
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -545,19 +602,47 @@ export class WebRTCManager {
           candidate: event.candidate,
         };
         this.broadcastChannel?.postMessage(iceMsg);
-        this.mqttClient?.publish(`locallink/v1/peer/${targetDeviceId}`, iceMsg);
+        this.mqttClient?.publish(`locallink/v2/peer/${targetDeviceId}`, iceMsg);
       }
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        session.isConnected = true;
-        this.events.onPeerConnected(targetDeviceId, peerInfo);
-      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        session.isConnected = false;
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        session!.isConnected = false;
         this.events.onPeerDisconnected(targetDeviceId);
       }
     };
+
+    pc.ondatachannel = (event) => {
+      const channel = event.channel;
+      if (channel.label === 'control') {
+        session!.controlChannel = channel;
+      } else if (channel.label === 'file') {
+        channel.binaryType = 'arraybuffer';
+        session!.fileChannel = channel;
+      }
+      if (session!.controlChannel && session!.fileChannel) {
+        this.setupDataChannelEvents(targetDeviceId, session!.controlChannel, session!.fileChannel);
+      }
+    };
+
+    return session;
+  }
+
+  // Initiator builds Offer
+  public async initiatePeerConnection(targetDeviceId: string, peerInfo: Partial<Device>): Promise<RTCPeerConnection> {
+    const session = this.getOrCreatePeerSession(targetDeviceId, peerInfo);
+    const pc = session.pc;
+
+    if (!session.controlChannel) {
+      const controlChannel = pc.createDataChannel('control', { ordered: true });
+      const fileChannel = pc.createDataChannel('file', { ordered: true });
+      fileChannel.binaryType = 'arraybuffer';
+
+      session.controlChannel = controlChannel;
+      session.fileChannel = fileChannel;
+      this.setupDataChannelEvents(targetDeviceId, controlChannel, fileChannel);
+    }
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -573,61 +658,28 @@ export class WebRTCManager {
     };
 
     this.broadcastChannel?.postMessage(offerMsg);
-    this.mqttClient?.publish(`locallink/v1/peer/${targetDeviceId}`, offerMsg);
+    this.mqttClient?.publish(`locallink/v2/peer/${targetDeviceId}`, offerMsg);
 
     return pc;
   }
 
+  // Receiver processes Offer & responds with Answer
   private async handleOffer(fromDeviceId: string, offer: RTCSessionDescriptionInit, peerInfo: Partial<Device>) {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const session: PeerSession = {
-      deviceId: fromDeviceId,
-      deviceInfo: peerInfo,
-      pc,
-      isConnected: false,
-      activeTransfers: new Map(),
-    };
-
-    this.peers.set(fromDeviceId, session);
-
-    pc.ondatachannel = (event) => {
-      const channel = event.channel;
-      if (channel.label === 'control') {
-        session.controlChannel = channel;
-      } else if (channel.label === 'file') {
-        channel.binaryType = 'arraybuffer';
-        session.fileChannel = channel;
-      }
-      if (session.controlChannel && session.fileChannel) {
-        this.setupDataChannelEvents(fromDeviceId, session.controlChannel, session.fileChannel);
-      }
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        const iceMsg = {
-          _locallink_signal: true,
-          type: 'webrtc_ice',
-          toDeviceId: fromDeviceId,
-          fromDeviceId: this.localProfile.deviceId,
-          candidate: event.candidate,
-        };
-        this.broadcastChannel?.postMessage(iceMsg);
-        this.mqttClient?.publish(`locallink/v1/peer/${fromDeviceId}`, iceMsg);
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        session.isConnected = true;
-        this.events.onPeerConnected(fromDeviceId, peerInfo);
-      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        session.isConnected = false;
-        this.events.onPeerDisconnected(fromDeviceId);
-      }
-    };
+    const session = this.getOrCreatePeerSession(fromDeviceId, peerInfo);
+    const pc = session.pc;
 
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+    // Flush any queued ICE candidates
+    while (session.iceCandidatesQueue.length > 0) {
+      const cand = session.iceCandidatesQueue.shift()!;
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (err) {
+        console.warn('[WebRTC] Flush candidate error:', err);
+      }
+    }
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
@@ -640,35 +692,48 @@ export class WebRTCManager {
     };
 
     this.broadcastChannel?.postMessage(answerMsg);
-    this.mqttClient?.publish(`locallink/v1/peer/${fromDeviceId}`, answerMsg);
+    this.mqttClient?.publish(`locallink/v2/peer/${fromDeviceId}`, answerMsg);
   }
 
   private async handleAnswer(fromDeviceId: string, answer: RTCSessionDescriptionInit) {
     const session = this.peers.get(fromDeviceId);
     if (session && session.pc) {
       await session.pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+      while (session.iceCandidatesQueue.length > 0) {
+        const cand = session.iceCandidatesQueue.shift()!;
+        try {
+          await session.pc.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (err) {
+          console.warn('[WebRTC] Flush candidate error on answer:', err);
+        }
+      }
     }
   }
 
   private async handleIceCandidate(fromDeviceId: string, candidate: RTCIceCandidateInit) {
     const session = this.peers.get(fromDeviceId);
-    if (session && session.pc && session.pc.remoteDescription) {
+    if (!session || !session.pc) return;
+
+    if (session.pc.remoteDescription && session.pc.remoteDescription.type) {
       try {
         await session.pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (err) {
         console.warn('[WebRTC] Add ICE candidate error:', err);
       }
+    } else {
+      session.iceCandidatesQueue.push(candidate);
     }
   }
 
-  // 4. Data Channels: Real P2P Chat, Control, Backpressured Chunk Streaming
+  // 6. DataChannel Lifecycle: Control & Binary Channels + ACK Engine
   private setupDataChannelEvents(peerId: string, controlChannel: RTCDataChannel, fileChannel: RTCDataChannel) {
     const session = this.peers.get(peerId);
     if (!session) return;
 
     controlChannel.onopen = () => {
       session.isConnected = true;
-      this.events.onPeerConnected(peerId, session.deviceInfo);
+      // Verification Handshake
       controlChannel.send(
         JSON.stringify({
           type: 'handshake',
@@ -680,6 +745,16 @@ export class WebRTCManager {
           },
         })
       );
+      this.events.onPeerConnected(peerId, session.deviceInfo);
+    };
+
+    controlChannel.onclose = () => {
+      session.isConnected = false;
+      this.events.onPeerDisconnected(peerId);
+    };
+
+    controlChannel.onerror = (err) => {
+      console.warn(`[WebRTC] ControlChannel error with ${peerId}:`, err);
     };
 
     controlChannel.onmessage = (event) => {
@@ -691,27 +766,89 @@ export class WebRTCManager {
             this.events.onPeerConnected(peerId, session.deviceInfo);
             break;
           }
+
           case 'chat_message': {
-            this.events.onMessageReceived(payload);
+            // Validate incoming message structure
+            if (!payload || !payload.id || !payload.senderId) return;
+
+            const validatedMsg: ChatMessage = {
+              id: payload.id,
+              conversationId: payload.senderId,
+              senderId: payload.senderId,
+              senderName: payload.senderName || session.deviceInfo.deviceName || 'Peer',
+              receiverId: this.localProfile.deviceId,
+              text: payload.text || '',
+              timestamp: payload.timestamp || Date.now(),
+              status: 'delivered',
+              fileAttachment: payload.fileAttachment,
+            };
+
+            this.lastMessageReceived = {
+              id: validatedMsg.id,
+              from: validatedMsg.senderId,
+              time: Date.now(),
+            };
+
+            // 1. Deliver to UI and DB
+            this.events.onMessageReceived(validatedMsg);
+
+            // 2. Transmit immediate Delivery ACK back to sender over Control DataChannel
+            if (controlChannel.readyState === 'open') {
+              controlChannel.send(
+                JSON.stringify({
+                  type: 'chat_ack',
+                  payload: {
+                    messageId: validatedMsg.id,
+                    conversationId: validatedMsg.senderId,
+                    status: 'delivered',
+                    timestamp: Date.now(),
+                  },
+                })
+              );
+            }
             break;
           }
+
+          case 'chat_ack': {
+            if (payload && payload.messageId && payload.status) {
+              this.lastAckReceived = {
+                id: payload.messageId,
+                status: payload.status,
+                time: Date.now(),
+              };
+              this.events.onMessageStatusUpdate(payload.messageId, payload.status);
+            }
+            break;
+          }
+
+          case 'chat_read': {
+            if (payload && payload.conversationId) {
+              this.events.onConversationReadReceived(payload.conversationId, payload.lastTimestamp || Date.now());
+            }
+            break;
+          }
+
           case 'typing': {
             this.events.onTypingStatus(peerId, payload.isTyping);
             break;
           }
+
           case 'clipboard': {
             this.events.onClipboardReceived(payload.senderName, payload.text);
             break;
           }
+
           case 'ping': {
             controlChannel.send(JSON.stringify({ type: 'pong', payload: { time: payload.time } }));
             break;
           }
+
           case 'pong': {
             const rtt = Math.round(performance.now() - payload.time);
             this.events.onLatencyUpdate(peerId, Math.max(1, rtt));
             break;
           }
+
           case 'file_meta': {
             session.activeTransfers.set(payload.id, {
               fileInfo: payload,
@@ -797,19 +934,56 @@ export class WebRTCManager {
     };
   }
 
-  // 5. Actions: Chat, Clipboard, High-Speed Backpressured File Transfer
+  // 7. Messaging, Read Acks, File Streaming
   public sendMessage(receiverId: string, message: ChatMessage): boolean {
+    const session = this.peers.get(receiverId);
+    if (!session || !session.controlChannel || session.controlChannel.readyState !== 'open') {
+      return false;
+    }
+
+    try {
+      session.controlChannel.send(
+        JSON.stringify({
+          type: 'chat_message',
+          payload: {
+            id: message.id,
+            conversationId: this.localProfile.deviceId,
+            senderId: this.localProfile.deviceId,
+            senderName: this.localProfile.deviceName,
+            receiverId,
+            text: message.text,
+            timestamp: message.timestamp,
+            fileAttachment: message.fileAttachment,
+          },
+        })
+      );
+
+      this.lastMessageSent = {
+        id: message.id,
+        to: receiverId,
+        time: Date.now(),
+        status: 'sent',
+      };
+      return true;
+    } catch (err) {
+      console.error('[WebRTC] Send message error:', err);
+      return false;
+    }
+  }
+
+  public sendReadReceipt(receiverId: string, conversationId: string) {
     const session = this.peers.get(receiverId);
     if (session && session.controlChannel && session.controlChannel.readyState === 'open') {
       session.controlChannel.send(
         JSON.stringify({
-          type: 'chat_message',
-          payload: message,
+          type: 'chat_read',
+          payload: {
+            conversationId,
+            lastTimestamp: Date.now(),
+          },
         })
       );
-      return true;
     }
-    return false;
   }
 
   public sendTyping(receiverId: string, isTyping: boolean) {

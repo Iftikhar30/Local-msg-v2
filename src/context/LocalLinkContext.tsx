@@ -10,6 +10,10 @@ import {
   NetworkDiagnosticsData,
   DeviceType,
   ConnectModalTab,
+  MessageStatus,
+  WebRTCDiagnostics,
+  DeviceApprovalStatus,
+  DeviceConnectionState,
 } from '../types';
 import { LocalDB } from '../services/db';
 import { NetworkAPI } from '../services/network';
@@ -17,12 +21,12 @@ import { sound } from '../services/sound';
 import { QRService } from '../services/qr';
 import { WebRTCManager } from '../services/webrtc';
 
-interface IncomingConnectionRequest {
+export interface IncomingConnectionRequest {
   requestId: string;
   fromDeviceId: string;
   fromDeviceName: string;
   fromDeviceAvatar?: string;
-  fromDeviceType: string;
+  fromDeviceType?: DeviceType;
   fromDeviceCode?: string;
   fromIp?: string;
   timestamp: number;
@@ -50,9 +54,10 @@ interface LocalLinkContextType {
   devices: Device[];
   trustedDeviceIds: string[];
   blockedDeviceIds: string[];
-  connectionStates: Record<string, 'disconnected' | 'connecting' | 'connected' | 'requested'>;
+  connectionStates: Record<string, DeviceConnectionState>;
   toggleTrustDevice: (deviceId: string) => Promise<void>;
   toggleBlockDevice: (deviceId: string) => Promise<void>;
+  deleteSavedDevice: (deviceId: string) => Promise<void>;
   requestConnection: (targetDeviceId: string) => void;
   connectByCode: (code: string) => Promise<{ success: boolean; message?: string; device?: Device }>;
   connectByQr: (qrString: string) => Promise<{ success: boolean; message?: string; device?: Device }>;
@@ -74,6 +79,9 @@ interface LocalLinkContextType {
   closeServerModal: () => void;
   customServiceUrl: string;
   setCustomServiceUrl: (url: string) => Promise<boolean>;
+
+  // Diagnostics
+  getDiagnostics: () => WebRTCDiagnostics;
 
   // Chat
   conversations: Conversation[];
@@ -108,8 +116,6 @@ interface LocalLinkContextType {
 }
 
 const LocalLinkContext = createContext<LocalLinkContextType | undefined>(undefined);
-
-const CHUNK_SIZE = 128 * 1024; // 128KB chunks for fast reliable transfer
 
 function detectDeviceType(): DeviceType {
   if (typeof window === 'undefined') return 'laptop';
@@ -174,7 +180,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setIsConnectModalOpen(false);
   }, []);
 
-  // Server Connection Modal State (for PC / Termux / Vercel Bridge)
+  // Server Connection Modal State
   const [isServerModalOpen, setIsServerModalOpen] = useState<boolean>(false);
   const [customServiceUrlState, setCustomServiceUrlState] = useState<string>(() => {
     if (typeof window === 'undefined') return '';
@@ -205,7 +211,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       allowConnectionRequests: true,
       allowMessages: true,
       allowFileTransfers: true,
-      allowClipboardSharing: false,
+      allowClipboardSharing: true,
       notifyMessages: true,
       notifyConnectionRequests: true,
       notifyTransfers: true,
@@ -227,7 +233,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [devices, setDevices] = useState<Device[]>([]);
   const [trustedDeviceIds, setTrustedDeviceIds] = useState<string[]>([]);
   const [blockedDeviceIds, setBlockedDeviceIds] = useState<string[]>([]);
-  const [connectionStates, setConnectionStates] = useState<Record<string, 'disconnected' | 'connecting' | 'connected' | 'requested'>>({});
+  const [connectionStates, setConnectionStates] = useState<Record<string, DeviceConnectionState>>({});
   const [pendingConnectionRequest, setPendingConnectionRequest] = useState<IncomingConnectionRequest | null>(null);
 
   // 5. Chat & Conversations State
@@ -266,13 +272,31 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   useEffect(() => {
     async function loadInitialDb() {
       try {
-        const [convs, trans, notifs, trusted, blocked] = await Promise.all([
+        const [savedDevices, convs, trans, notifs, trusted, blocked] = await Promise.all([
+          LocalDB.getDevices(),
           LocalDB.getConversations(),
           LocalDB.getTransfers(),
           LocalDB.getNotifications(),
           LocalDB.getTrustedDeviceIds(),
           LocalDB.getBlockedDeviceIds(),
         ]);
+
+        const initialConnectionStates: Record<string, DeviceConnectionState> = {};
+        const formattedDevices = savedDevices.map((d) => {
+          const isT = trusted.includes(d.deviceId);
+          const isB = blocked.includes(d.deviceId);
+          const cState = d.connectionState || 'disconnected';
+          initialConnectionStates[d.deviceId] = cState;
+          return {
+            ...d,
+            isTrusted: isT,
+            isBlocked: isB,
+            connectionState: cState,
+          };
+        });
+
+        setDevices(formattedDevices);
+        setConnectionStates(initialConnectionStates);
         setConversations(convs);
         setTransfers(trans);
         setNotifications(notifs);
@@ -285,79 +309,229 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     loadInitialDb();
   }, []);
 
-  // Initialize WebRTC P2P DataChannel Mesh
+  // Initialize WebRTC P2P DataChannel Manager
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const webrtc = new WebRTCManager(profile, {
+      onPeerDiscovered: (deviceId, peerInfo) => {
+        setDevices((prev) => {
+          const idx = prev.findIndex((d) => d.deviceId === deviceId);
+          if (idx >= 0) {
+            const existing = prev[idx];
+            const updated: Device = {
+              ...existing,
+              ...peerInfo,
+              lastSeen: Date.now(),
+              isOnline: true,
+            };
+            LocalDB.saveDevice(updated);
+            const copy = [...prev];
+            copy[idx] = updated;
+            return copy;
+          }
+
+          const newDevice: Device = {
+            deviceId,
+            deviceName: peerInfo.deviceName || 'Peer Device',
+            deviceType: peerInfo.deviceType || 'laptop',
+            deviceCode: peerInfo.deviceCode || '0000',
+            os: peerInfo.os || 'Browser',
+            ip: peerInfo.ip || 'WebRTC LAN',
+            port: 0,
+            lastSeen: Date.now(),
+            isOnline: true,
+            version: '1.0.0',
+            status: 'pending',
+            connectionState: 'discovered',
+            addedAt: Date.now(),
+          };
+          LocalDB.saveDevice(newDevice);
+          return [...prev, newDevice];
+        });
+
+        setConnectionStates((prev) => {
+          // Keep current state if already connected or requested
+          if (prev[deviceId] === 'connected' || prev[deviceId] === 'requested' || prev[deviceId] === 'connecting') {
+            return prev;
+          }
+          return { ...prev, [deviceId]: 'discovered' };
+        });
+      },
+
       onPeerConnected: (deviceId, peerInfo) => {
         setDevices((prev) => {
           const idx = prev.findIndex((d) => d.deviceId === deviceId);
           if (idx >= 0) {
+            const updated: Device = {
+              ...prev[idx],
+              ...peerInfo,
+              status: 'accepted',
+              connectionState: 'connected',
+              isOnline: true,
+              lastSeen: Date.now(),
+            };
+            LocalDB.saveDevice(updated);
             const copy = [...prev];
-            copy[idx] = { ...copy[idx], ...peerInfo, isOnline: true };
+            copy[idx] = updated;
             return copy;
           }
-          return [
-            ...prev,
-            {
-              deviceId,
-              deviceName: peerInfo.deviceName || 'Peer Device',
-              deviceType: peerInfo.deviceType || 'laptop',
-              deviceCode: peerInfo.deviceCode || '0000',
-              os: 'Browser',
-              ip: 'WebRTC P2P',
-              port: 0,
-              lastSeen: Date.now(),
-              isOnline: true,
-              version: '1.0.0',
-            },
-          ];
+
+          const newDev: Device = {
+            deviceId,
+            deviceName: peerInfo.deviceName || 'Peer Device',
+            deviceType: peerInfo.deviceType || 'laptop',
+            deviceCode: peerInfo.deviceCode || '0000',
+            os: 'Browser',
+            ip: 'WebRTC P2P',
+            port: 0,
+            lastSeen: Date.now(),
+            isOnline: true,
+            version: '1.0.0',
+            status: 'accepted',
+            connectionState: 'connected',
+            addedAt: Date.now(),
+          };
+          LocalDB.saveDevice(newDev);
+          return [...prev, newDev];
         });
+
         setConnectionStates((prev) => ({ ...prev, [deviceId]: 'connected' }));
         setWsState('connected');
         sound.playConnectionSound();
+
+        addToast({
+          title: 'Connected',
+          message: `Connected with ${peerInfo.deviceName || 'Peer'} via WebRTC DataChannel.`,
+          type: 'success',
+        });
       },
 
       onPeerDisconnected: (deviceId) => {
         setDevices((prev) =>
-          prev.map((d) => (d.deviceId === deviceId ? { ...d, isOnline: false } : d))
+          prev.map((d) => {
+            if (d.deviceId === deviceId) {
+              const updated = { ...d, connectionState: 'disconnected' as DeviceConnectionState };
+              LocalDB.saveDevice(updated);
+              return updated;
+            }
+            return d;
+          })
         );
         setConnectionStates((prev) => ({ ...prev, [deviceId]: 'disconnected' }));
       },
 
+      onIncomingConnectionRequest: (req) => {
+        // Auto-check if blocked
+        if (blockedDeviceIds.includes(req.fromDeviceId)) {
+          webrtc.respondToConnectionRequest(req.fromDeviceId, false);
+          return;
+        }
+
+        // Check if auto-accept for trusted device
+        if (settings.autoReconnect && trustedDeviceIds.includes(req.fromDeviceId)) {
+          webrtc.respondToConnectionRequest(req.fromDeviceId, true);
+          setConnectionStates((prev) => ({ ...prev, [req.fromDeviceId]: 'connecting' }));
+          return;
+        }
+
+        // Otherwise show modal prompt
+        setPendingConnectionRequest({
+          requestId: req.requestId,
+          fromDeviceId: req.fromDeviceId,
+          fromDeviceName: req.fromDeviceName,
+          fromDeviceCode: req.fromDeviceCode,
+          fromDeviceType: req.fromDeviceType || 'laptop',
+          timestamp: Date.now(),
+        });
+        sound.playConnectionSound();
+      },
+
+      onConnectionResponse: (fromDeviceId, accepted) => {
+        setConnectionStates((prev) => ({
+          ...prev,
+          [fromDeviceId]: accepted ? 'connecting' : 'disconnected',
+        }));
+
+        setDevices((prev) =>
+          prev.map((d) => {
+            if (d.deviceId === fromDeviceId) {
+              const updated = {
+                ...d,
+                status: (accepted ? 'accepted' : 'rejected') as DeviceApprovalStatus,
+                connectionState: (accepted ? 'connecting' : 'disconnected') as DeviceConnectionState,
+              };
+              LocalDB.saveDevice(updated);
+              return updated;
+            }
+            return d;
+          })
+        );
+
+        if (accepted) {
+          addToast({
+            title: 'Connection Accepted',
+            message: 'Negotiating direct WebRTC DataChannel connection...',
+            type: 'info',
+          });
+        } else {
+          addToast({
+            title: 'Connection Rejected',
+            message: 'Target device rejected the connection request.',
+            type: 'warning',
+          });
+        }
+      },
+
       onMessageReceived: async (msg) => {
+        // Check duplicate
+        const exists = await LocalDB.hasMessage(msg.id);
+        if (exists) return;
+
         await LocalDB.saveMessage(msg);
+
+        // Update conversation
         setConversations((prev) => {
           const idx = prev.findIndex((c) => c.deviceId === msg.conversationId || c.id === msg.conversationId);
           if (idx >= 0) {
-            const copy = [...prev];
-            copy[idx] = {
-              ...copy[idx],
+            const updated = {
+              ...prev[idx],
               lastMessage: msg.text || (msg.fileAttachment ? `📎 ${msg.fileAttachment.name}` : ''),
               lastTimestamp: msg.timestamp,
-              unreadCount: copy[idx].unreadCount + 1,
+              unreadCount: (prev[idx].unreadCount || 0) + 1,
             };
+            LocalDB.saveConversation(updated);
+            const copy = [...prev];
+            copy[idx] = updated;
             return copy;
           }
-          return [
-            {
-              id: msg.conversationId,
-              deviceId: msg.conversationId,
-              deviceName: msg.senderName,
-              lastMessage: msg.text || '',
-              lastTimestamp: msg.timestamp,
-              unreadCount: 1,
-            },
-            ...prev,
-          ];
+
+          const newConv: Conversation = {
+            id: msg.conversationId,
+            deviceId: msg.conversationId,
+            deviceName: msg.senderName,
+            lastMessage: msg.text || (msg.fileAttachment ? `📎 ${msg.fileAttachment.name}` : ''),
+            lastTimestamp: msg.timestamp,
+            unreadCount: 1,
+          };
+          LocalDB.saveConversation(newConv);
+          return [newConv, ...prev];
         });
+
         sound.playMessageSound();
         addToast({
           title: `Message from ${msg.senderName}`,
-          message: msg.text.length > 40 ? `${msg.text.substring(0, 40)}...` : msg.text,
+          message: msg.text.length > 50 ? `${msg.text.substring(0, 50)}...` : msg.text,
           type: 'info',
         });
+      },
+
+      onMessageStatusUpdate: async (messageId, status) => {
+        await LocalDB.updateMessageStatus(messageId, status);
+      },
+
+      onConversationReadReceived: async (conversationId, lastTimestamp) => {
+        await LocalDB.markConversationMessagesRead(conversationId);
       },
 
       onTypingStatus: (deviceId, isTyping) => {
@@ -391,7 +565,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         sound.playSuccessSound();
         addToast({
           title: 'File Received',
-          message: `Received "${transfer.fileName}" (${Math.round(transfer.fileSize / 1024)} KB) via P2P.`,
+          message: `Received "${transfer.fileName}" (${Math.round(transfer.fileSize / 1024)} KB) via WebRTC.`,
           type: 'success',
         });
       },
@@ -405,41 +579,14 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         });
       },
 
-      onIncomingConnectionRequest: (fromDev) => {
-        setPendingConnectionRequest({
-          requestId: `req_${Date.now()}`,
-          fromDeviceId: fromDev.deviceId,
-          fromDeviceName: fromDev.deviceName,
-          fromDeviceCode: fromDev.deviceCode,
-          fromDeviceType: fromDev.deviceType || 'laptop',
-          timestamp: Date.now(),
-        });
-        sound.playConnectionSound();
-      },
-
-      onConnectionResponse: (fromDeviceId, accepted) => {
-        setConnectionStates((prev) => ({
-          ...prev,
-          [fromDeviceId]: accepted ? 'connected' : 'disconnected',
-        }));
-        if (accepted) {
-          sound.playSuccessSound();
-          addToast({
-            title: 'Connection Accepted',
-            message: 'Direct WebRTC DataChannel connection is active.',
-            type: 'success',
-          });
-        } else {
-          addToast({
-            title: 'Connection Declined',
-            message: 'Peer declined connection.',
-            type: 'warning',
-          });
-        }
-      },
-
       onLatencyUpdate: (deviceId, rtt) => {
         setLatencyMs(rtt);
+      },
+
+      onSignalingStateChange: (connected) => {
+        if (connected) {
+          setWsState('connected');
+        }
       },
     });
 
@@ -451,7 +598,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return () => {
       webrtc.destroy();
     };
-  }, [profile, addToast]);
+  }, [profile, blockedDeviceIds, trustedDeviceIds, settings.autoReconnect, addToast]);
 
   // Fetch LAN Network Info
   const refreshNetwork = useCallback(async () => {
@@ -467,478 +614,9 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   useEffect(() => {
     refreshNetwork();
-    const interval = setInterval(refreshNetwork, 10000);
+    const interval = setInterval(refreshNetwork, 12000);
     return () => clearInterval(interval);
   }, [refreshNetwork]);
-
-  // Send message over WebSocket
-  const sendWs = useCallback((type: string, payload: any) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type, payload }));
-    }
-  }, []);
-
-  // Initialize and maintain WebSocket connection
-  const connectWebSocket = useCallback(() => {
-    if (typeof window === 'undefined') return;
-
-    if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {
-        // ignore
-      }
-    }
-
-    setWsState('connecting');
-
-    // Determine target WebSocket URL (supports custom Local Server URL when on Vercel/LAN)
-    let wsUrl = '';
-    const customService = localStorage.getItem('locallink_custom_service_url');
-    if (customService && customService.trim().length > 0) {
-      const clean = customService.trim().replace(/\/+$/, '');
-      const wsProto = clean.startsWith('https:') ? 'wss:' : 'ws:';
-      const hostPart = clean.replace(/^https?:\/\//, '');
-      wsUrl = `${wsProto}//${hostPart}/ws`;
-    } else {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/ws`;
-    }
-
-    try {
-      const socket = new WebSocket(wsUrl);
-      wsRef.current = socket;
-
-      socket.onopen = () => {
-        setWsState('connected');
-        // Register current device profile
-        socket.send(
-          JSON.stringify({
-            type: 'device:register',
-            payload: {
-              deviceId: profile.deviceId,
-              deviceName: profile.deviceName,
-              deviceType: profile.deviceType,
-              os: profile.deviceType === 'phone' ? 'Mobile' : 'Desktop',
-              avatar: profile.avatar,
-              deviceCode: profile.deviceCode,
-            },
-          })
-        );
-
-        // Ping for latency
-        pingStartRef.current = performance.now();
-        socket.send(JSON.stringify({ type: 'ping', payload: {} }));
-      };
-
-      socket.onmessage = async (event) => {
-        try {
-          const { type, payload } = JSON.parse(event.data);
-
-          switch (type) {
-            case 'pong': {
-              const roundtrip = Math.round(performance.now() - pingStartRef.current);
-              setLatencyMs(Math.max(1, roundtrip));
-              break;
-            }
-
-            case 'devices:update': {
-              const updatedDevices = (payload.devices || []).map((d: any) => ({
-                ...d,
-                isTrusted: trustedDeviceIds.includes(d.deviceId),
-                isBlocked: blockedDeviceIds.includes(d.deviceId),
-              }));
-              setDevices(updatedDevices);
-              break;
-            }
-
-            case 'connection:request': {
-              // Check privacy settings
-              if (!settings.allowConnectionRequests) {
-                // Auto-reject if disabled
-                sendWs('connection:response', {
-                  requestId: payload.requestId,
-                  fromDeviceId: profile.deviceId,
-                  toDeviceId: payload.fromDeviceId,
-                  accepted: false,
-                  reason: 'Device is not accepting connection requests.',
-                });
-                return;
-              }
-
-              // Check if device is blocked
-              if (blockedDeviceIds.includes(payload.fromDeviceId)) {
-                sendWs('connection:response', {
-                  requestId: payload.requestId,
-                  fromDeviceId: profile.deviceId,
-                  toDeviceId: payload.fromDeviceId,
-                  accepted: false,
-                  reason: 'Blocked',
-                });
-                return;
-              }
-
-              // Check if already trusted -> auto accept!
-              if (trustedDeviceIds.includes(payload.fromDeviceId)) {
-                sendWs('connection:response', {
-                  requestId: payload.requestId,
-                  fromDeviceId: profile.deviceId,
-                  toDeviceId: payload.fromDeviceId,
-                  accepted: true,
-                });
-                setConnectionStates((prev) => ({ ...prev, [payload.fromDeviceId]: 'connected' }));
-                addToast({
-                  title: 'Connected',
-                  message: `Reconnected automatically with trusted device ${payload.fromDeviceName}.`,
-                  type: 'success',
-                });
-                return;
-              }
-
-              // Show incoming connection modal / notification
-              setPendingConnectionRequest(payload);
-              if (settings.notifyConnectionRequests) {
-                sound.playConnectionSound();
-              }
-
-              const notif: AppNotification = {
-                id: `notif_${Date.now()}`,
-                type: 'connection_request',
-                title: 'Connection Request',
-                description: `${payload.fromDeviceName} wants to connect with your device.`,
-                timestamp: Date.now(),
-                read: false,
-                data: payload,
-              };
-              LocalDB.saveNotification(notif);
-              setNotifications((prev) => [notif, ...prev]);
-              break;
-            }
-
-            case 'connection:response': {
-              const { fromDeviceId, accepted, reason } = payload;
-              if (accepted) {
-                setConnectionStates((prev) => ({ ...prev, [fromDeviceId]: 'connected' }));
-                sound.playSuccessSound();
-                addToast({
-                  title: 'Connection Accepted',
-                  message: `You are now securely connected on LAN.`,
-                  type: 'success',
-                });
-
-                const notif: AppNotification = {
-                  id: `notif_${Date.now()}`,
-                  type: 'device_connected',
-                  title: 'Device Connected',
-                  description: `Connection established. You can now chat and send files.`,
-                  timestamp: Date.now(),
-                  read: false,
-                };
-                LocalDB.saveNotification(notif);
-                setNotifications((prev) => [notif, ...prev]);
-              } else {
-                setConnectionStates((prev) => ({ ...prev, [fromDeviceId]: 'disconnected' }));
-                addToast({
-                  title: 'Connection Declined',
-                  message: reason || 'The device declined your connection request.',
-                  type: 'warning',
-                });
-              }
-              break;
-            }
-
-            case 'connection:disconnected': {
-              const { fromDeviceId } = payload;
-              setConnectionStates((prev) => ({ ...prev, [fromDeviceId]: 'disconnected' }));
-              addToast({
-                title: 'Device Disconnected',
-                message: `Peer closed the local connection.`,
-                type: 'info',
-              });
-              break;
-            }
-
-            case 'connection:error': {
-              const { toDeviceId, message } = payload;
-              setConnectionStates((prev) => ({ ...prev, [toDeviceId]: 'disconnected' }));
-              addToast({
-                title: 'Connection Error',
-                message: message || 'Unable to establish connection.',
-                type: 'error',
-              });
-              break;
-            }
-
-            case 'chat:message': {
-              if (!settings.allowMessages || blockedDeviceIds.includes(payload.senderId)) {
-                return;
-              }
-
-              const msg: ChatMessage = {
-                id: payload.id,
-                conversationId: payload.senderId,
-                senderId: payload.senderId,
-                senderName: payload.senderName || 'Peer',
-                receiverId: profile.deviceId,
-                text: payload.text,
-                timestamp: payload.timestamp || Date.now(),
-                status: 'delivered',
-                fileAttachment: payload.fileAttachment,
-              };
-
-              await LocalDB.saveMessage(msg);
-
-              // Update conversation
-              const updatedConv: Conversation = {
-                id: payload.senderId,
-                deviceId: payload.senderId,
-                deviceName: payload.senderName || 'Peer',
-                lastMessage: payload.fileAttachment ? `[File] ${payload.fileAttachment.name}` : payload.text,
-                lastTimestamp: msg.timestamp,
-                unreadCount: 1,
-              };
-              await LocalDB.saveConversation(updatedConv);
-              setConversations((prev) => {
-                const rest = prev.filter((c) => c.deviceId !== payload.senderId);
-                const existing = prev.find((c) => c.deviceId === payload.senderId);
-                const unread = (existing?.unreadCount || 0) + 1;
-                return [{ ...updatedConv, unreadCount: unread }, ...rest];
-              });
-
-              if (settings.notifyMessages) {
-                sound.playMessageSound();
-                addToast({
-                  title: payload.senderName || 'New Message',
-                  message: payload.text.length > 50 ? payload.text.substring(0, 50) + '...' : payload.text,
-                  type: 'info',
-                });
-              }
-
-              // Acknowledge read if currently viewed or delivered receipt
-              sendWs('chat:receipt', {
-                messageId: msg.id,
-                conversationId: payload.senderId,
-                senderId: payload.senderId,
-                receiverId: profile.deviceId,
-                status: 'delivered',
-              });
-              break;
-            }
-
-            case 'chat:typing': {
-              const { senderId, isTyping } = payload;
-              setTypingMap((prev) => ({ ...prev, [senderId]: isTyping }));
-              break;
-            }
-
-            case 'chat:receipt': {
-              const { messageId, status } = payload;
-              await LocalDB.updateMessageStatus(messageId, status);
-              break;
-            }
-
-            case 'clipboard:share': {
-              if (!settings.allowClipboardSharing) {
-                return;
-              }
-              const { senderName, text, timestamp } = payload;
-              setReceivedClipboard({ senderName, text, timestamp });
-              sound.playMessageSound();
-              addToast({
-                title: 'Clipboard Shared',
-                message: `${senderName} sent you clipboard text: "${text.substring(0, 40)}..."`,
-                type: 'info',
-              });
-              break;
-            }
-
-            case 'transfer:offer': {
-              if (!settings.allowFileTransfers || blockedDeviceIds.includes(payload.senderId)) {
-                sendWs('transfer:response', {
-                  transferId: payload.transferId,
-                  toDeviceId: payload.senderId,
-                  accepted: false,
-                  reason: 'Transfers not accepted.',
-                });
-                return;
-              }
-
-              // Record incoming transfer
-              const newTransfer: FileTransfer = {
-                id: payload.transferId,
-                direction: 'received',
-                deviceId: payload.senderId,
-                deviceName: payload.senderName || 'Peer',
-                fileName: payload.fileName,
-                fileSize: payload.fileSize,
-                fileType: payload.fileType,
-                bytesTransferred: 0,
-                totalChunks: payload.totalChunks,
-                completedChunks: 0,
-                speedBps: 0,
-                etaSeconds: 0,
-                status: 'transferring',
-                timestamp: Date.now(),
-              };
-
-              await LocalDB.saveTransfer(newTransfer);
-              setTransfers((prev) => [newTransfer, ...prev]);
-
-              // Automatically accept valid incoming file transfer from connected peer
-              sendWs('transfer:response', {
-                transferId: payload.transferId,
-                toDeviceId: payload.senderId,
-                accepted: true,
-              });
-
-              if (settings.notifyTransfers) {
-                addToast({
-                  title: 'Incoming File',
-                  message: `Receiving "${payload.fileName}" (${(payload.fileSize / 1024 / 1024).toFixed(1)} MB)`,
-                  type: 'info',
-                });
-              }
-              break;
-            }
-
-            case 'transfer:progress': {
-              const { transferId, bytesTransferred, totalBytes, speedBps, etaSeconds } = payload;
-              setTransfers((prev) =>
-                prev.map((t) => {
-                  if (t.id === transferId) {
-                    return {
-                      ...t,
-                      bytesTransferred,
-                      speedBps,
-                      etaSeconds,
-                      status: 'transferring',
-                    };
-                  }
-                  return t;
-                })
-              );
-              break;
-            }
-
-            case 'transfer:complete': {
-              const { transferId, status, error, fileName } = payload;
-              const downloadUrl = NetworkAPI.getDownloadUrl(transferId);
-
-              setTransfers((prev) =>
-                prev.map((t) => {
-                  if (t.id === transferId) {
-                    return {
-                      ...t,
-                      status: status || 'completed',
-                      error,
-                      bytesTransferred: t.fileSize,
-                      downloadUrl,
-                    };
-                  }
-                  return t;
-                })
-              );
-
-              sound.playSuccessSound();
-              addToast({
-                title: 'Transfer Completed',
-                message: `File transfer completed for "${fileName || 'file'}".`,
-                type: 'success',
-              });
-
-              const notif: AppNotification = {
-                id: `notif_${Date.now()}`,
-                type: 'file_completed',
-                title: 'File Transfer Complete',
-                description: `Received "${fileName || 'file'}" successfully.`,
-                timestamp: Date.now(),
-                read: false,
-                actionRoute: '/transfers',
-              };
-              LocalDB.saveNotification(notif);
-              setNotifications((prev) => [notif, ...prev]);
-              break;
-            }
-
-            case 'transfer:cancel': {
-              const { transferId } = payload;
-              setTransfers((prev) =>
-                prev.map((t) => (t.id === transferId ? { ...t, status: 'cancelled' } : t))
-              );
-              addToast({
-                title: 'Transfer Cancelled',
-                message: `Peer cancelled the transfer.`,
-                type: 'warning',
-              });
-              break;
-            }
-          }
-        } catch (e) {
-          console.error('[WS Parse Message Error]:', e);
-        }
-      };
-
-      socket.onclose = () => {
-        // If WebRTC is supported in browser, we remain in active P2P mesh state
-        if (typeof window !== 'undefined' && 'RTCPeerConnection' in window) {
-          setWsState('connected');
-        } else {
-          setWsState('disconnected');
-        }
-        // Auto-reconnect with 3-second delay
-        if (settings.autoReconnect) {
-          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = setTimeout(connectWebSocket, 3000);
-        }
-      };
-
-      socket.onerror = () => {
-        if (typeof window !== 'undefined' && 'RTCPeerConnection' in window) {
-          setWsState('connected');
-        } else {
-          setWsState('disconnected');
-        }
-      };
-    } catch {
-      if (typeof window !== 'undefined' && 'RTCPeerConnection' in window) {
-        setWsState('connected');
-      } else {
-        setWsState('disconnected');
-      }
-    }
-  }, [
-    profile,
-    settings,
-    trustedDeviceIds,
-    blockedDeviceIds,
-    sendWs,
-    addToast,
-  ]);
-
-  useEffect(() => {
-    connectWebSocket();
-    return () => {
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) {
-        try {
-          wsRef.current.close();
-        } catch {
-          // ignore
-        }
-      }
-    };
-  }, [connectWebSocket]);
-
-  // Periodic ping for latency test
-  useEffect(() => {
-    const pingInterval = setInterval(() => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        pingStartRef.current = performance.now();
-        wsRef.current.send(JSON.stringify({ type: 'ping', payload: {} }));
-      }
-    }, 8000);
-    return () => clearInterval(pingInterval);
-  }, []);
 
   // Update profile
   const updateProfile = (updates: Partial<UserProfile>) => {
@@ -949,15 +627,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (updates.avatar) localStorage.setItem('locallink_device_avatar', updates.avatar);
       if (updates.description) localStorage.setItem('locallink_device_desc', updates.description);
 
-      // Re-register to server
-      sendWs('device:register', {
-        deviceId: next.deviceId,
-        deviceName: next.deviceName,
-        deviceType: next.deviceType,
-        os: next.deviceType === 'phone' ? 'Mobile' : 'Desktop',
-        avatar: next.avatar,
-      });
-
+      webrtcRef.current?.updateProfile(next);
       return next;
     });
   };
@@ -968,14 +638,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     localStorage.setItem('locallink_device_id', newId);
     setProfile((prev) => {
       const next = { ...prev, deviceId: newId };
-      sendWs('device:register', {
-        deviceId: newId,
-        deviceName: next.deviceName,
-        deviceType: next.deviceType,
-        os: next.deviceType === 'phone' ? 'Mobile' : 'Desktop',
-        avatar: next.avatar,
-        deviceCode: next.deviceCode,
-      });
+      webrtcRef.current?.updateProfile(next);
       return next;
     });
     addToast({
@@ -991,14 +654,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     localStorage.setItem('locallink_device_code', newCode);
     setProfile((prev) => {
       const next = { ...prev, deviceCode: newCode };
-      sendWs('device:register', {
-        deviceId: next.deviceId,
-        deviceName: next.deviceName,
-        deviceType: next.deviceType,
-        os: next.deviceType === 'phone' ? 'Mobile' : 'Desktop',
-        avatar: next.avatar,
-        deviceCode: newCode,
-      });
+      webrtcRef.current?.updateProfile(next);
       return next;
     });
     sound.playSuccessSound();
@@ -1019,51 +675,48 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   };
 
-  // Set Custom Server URL (for PC / Termux / Vercel Bridge)
+  // Set Custom Server URL
   const setCustomServiceUrl = useCallback(
     async (url: string): Promise<boolean> => {
       const clean = url.trim().replace(/\/+$/, '');
       if (!clean) {
         localStorage.removeItem('locallink_custom_service_url');
         setCustomServiceUrlState('');
-        connectWebSocket();
         refreshNetwork();
         return true;
       }
 
-      try {
-        const res = await fetch(`${clean}/api/network/info`, { signal: AbortSignal.timeout(3500) });
-        if (res.ok) {
-          localStorage.setItem('locallink_custom_service_url', clean);
-          setCustomServiceUrlState(clean);
-          connectWebSocket();
-          refreshNetwork();
-          return true;
-        }
-      } catch {
-        // network probe error
-      }
-
-      // Save anyway and attempt WebSocket connection
       localStorage.setItem('locallink_custom_service_url', clean);
       setCustomServiceUrlState(clean);
-      connectWebSocket();
       refreshNetwork();
-      return false;
+      return true;
     },
-    [connectWebSocket, refreshNetwork]
+    [refreshNetwork]
   );
 
   // Device Discovery trigger
   const scanDevices = async () => {
-    await NetworkAPI.triggerLanScan();
-    sendWs('devices:get', {});
+    webrtcRef.current?.broadcastPresence();
     addToast({
       title: 'Scanning LAN',
       message: 'Broadcasting discovery beacon across local network...',
       type: 'info',
     });
   };
+
+  // Diagnostics summary for Settings -> Connection Diagnostics
+  const getDiagnostics = useCallback((): WebRTCDiagnostics => {
+    return {
+      localDeviceId: profile.deviceId,
+      localDeviceCode: profile.deviceCode,
+      signalingConnected: webrtcRef.current?.getSignalingState() ?? true,
+      connectedPeerCount: webrtcRef.current?.getConnectedPeerIds().length ?? 0,
+      activePeers: webrtcRef.current?.getActivePeersDiagnostics() ?? [],
+      lastMessageSent: webrtcRef.current?.lastMessageSent,
+      lastMessageReceived: webrtcRef.current?.lastMessageReceived,
+      lastAckReceived: webrtcRef.current?.lastAckReceived,
+    };
+  }, [profile.deviceId, profile.deviceCode]);
 
   // Trust / Block devices
   const toggleTrustDevice = async (deviceId: string) => {
@@ -1072,11 +725,14 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setTrustedDeviceIds((prev) =>
       !isCurrentlyTrusted ? [...prev, deviceId] : prev.filter((id) => id !== deviceId)
     );
+    setDevices((prev) =>
+      prev.map((d) => (d.deviceId === deviceId ? { ...d, isTrusted: !isCurrentlyTrusted } : d))
+    );
     addToast({
       title: !isCurrentlyTrusted ? 'Device Trusted' : 'Trust Removed',
       message: !isCurrentlyTrusted
-        ? 'Future connections with this device will connect automatically.'
-        : 'Device will require approval for new connections.',
+        ? 'Future connections from this device can connect automatically.'
+        : 'Device will require approval for future connections.',
       type: 'info',
     });
   };
@@ -1088,38 +744,53 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       !isCurrentlyBlocked ? [...prev, deviceId] : prev.filter((id) => id !== deviceId)
     );
     if (!isCurrentlyBlocked) {
+      webrtcRef.current?.disconnect(deviceId);
       setConnectionStates((prev) => ({ ...prev, [deviceId]: 'disconnected' }));
     }
+    setDevices((prev) =>
+      prev.map((d) =>
+        d.deviceId === deviceId
+          ? { ...d, isBlocked: !isCurrentlyBlocked, status: (!isCurrentlyBlocked ? 'blocked' : 'pending') as DeviceApprovalStatus }
+          : d
+      )
+    );
     addToast({
       title: !isCurrentlyBlocked ? 'Device Blocked' : 'Device Unblocked',
       message: !isCurrentlyBlocked
-        ? 'All messages, connection requests and transfers from this device will be rejected.'
+        ? 'All messages and requests from this device will be rejected.'
         : 'Device unblocked.',
       type: 'warning',
     });
   };
 
-  // Connection handling
+  const deleteSavedDevice = async (deviceId: string) => {
+    await LocalDB.deleteDevice(deviceId);
+    webrtcRef.current?.disconnect(deviceId);
+    setDevices((prev) => prev.filter((d) => d.deviceId !== deviceId));
+    setConnectionStates((prev) => {
+      const copy = { ...prev };
+      delete copy[deviceId];
+      return copy;
+    });
+    addToast({ title: 'Device Removed', message: 'Device removed from local list.', type: 'info' });
+  };
+
+  // Connection Request Handling (DISCOVERED -> REQUESTED -> CONNECTED)
   const requestConnection = (targetDeviceId: string) => {
     setConnectionStates((prev) => ({ ...prev, [targetDeviceId]: 'requested' }));
+    setDevices((prev) =>
+      prev.map((d) =>
+        d.deviceId === targetDeviceId
+          ? { ...d, connectionState: 'requested', status: 'pending' }
+          : d
+      )
+    );
 
-    // 1. Send via WebRTC P2P mesh
     webrtcRef.current?.requestConnectByDeviceId(targetDeviceId);
-
-    // 2. Fallback via WebSocket if connected
-    sendWs('connection:request', {
-      toDeviceId: targetDeviceId,
-      requestId: `req_${Date.now()}`,
-      fromDeviceId: profile.deviceId,
-      fromDeviceName: profile.deviceName,
-      fromDeviceAvatar: profile.avatar,
-      fromDeviceType: profile.deviceType,
-      fromDeviceCode: profile.deviceCode,
-    });
 
     addToast({
       title: 'Connection Requested',
-      message: 'Requesting P2P connection...',
+      message: 'Waiting for peer permission...',
       type: 'info',
     });
   };
@@ -1135,30 +806,19 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return { success: false, message: 'This is your own device code.' };
     }
 
-    // 1. Broadcast WebRTC connection request for this code
-    webrtcRef.current?.requestConnectByCode(cleanCode);
+    // 1. Send request by code
+    await webrtcRef.current?.requestConnectByCode(cleanCode);
 
-    // 2. Check in currently known devices state
+    // 2. Check if already known
     const foundDev = devices.find((d) => d.deviceCode === cleanCode && !d.isSelf);
     if (foundDev) {
-      requestConnection(foundDev.deviceId);
+      setConnectionStates((prev) => ({ ...prev, [foundDev.deviceId]: 'requested' }));
       return { success: true, device: foundDev };
     }
 
-    // 3. Fallback: send WebSocket connection:request_by_code
-    sendWs('connection:request_by_code', {
-      code: cleanCode,
-      requestId: `req_${Date.now()}`,
-      fromDeviceId: profile.deviceId,
-      fromDeviceName: profile.deviceName,
-      fromDeviceAvatar: profile.avatar,
-      fromDeviceType: profile.deviceType,
-      fromDeviceCode: profile.deviceCode,
-    });
-
     addToast({
       title: 'Connecting by Code',
-      message: `Searching LAN for device #${cleanCode}...`,
+      message: `Searching LAN for device #${cleanCode}. Waiting for permission...`,
       type: 'info',
     });
 
@@ -1190,37 +850,43 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const acceptConnection = (req: IncomingConnectionRequest) => {
-    // 1. Respond via WebRTC
     webrtcRef.current?.respondToConnectionRequest(req.fromDeviceId, true);
 
-    // 2. Respond via WebSocket
-    sendWs('connection:response', {
-      requestId: req.requestId,
-      fromDeviceId: profile.deviceId,
-      toDeviceId: req.fromDeviceId,
-      accepted: true,
-    });
+    setConnectionStates((prev) => ({ ...prev, [req.fromDeviceId]: 'connecting' }));
+    setDevices((prev) =>
+      prev.map((d) =>
+        d.deviceId === req.fromDeviceId
+          ? { ...d, connectionState: 'connecting', status: 'accepted' }
+          : d
+      )
+    );
 
-    setConnectionStates((prev) => ({ ...prev, [req.fromDeviceId]: 'connected' }));
     setPendingConnectionRequest(null);
-    sound.playSuccessSound();
     addToast({
-      title: 'Connection Established',
-      message: `You are connected with ${req.fromDeviceName} via WebRTC.`,
-      type: 'success',
+      title: 'Request Accepted',
+      message: `Connecting with ${req.fromDeviceName}...`,
+      type: 'info',
     });
   };
 
   const rejectConnection = (req: IncomingConnectionRequest) => {
     webrtcRef.current?.respondToConnectionRequest(req.fromDeviceId, false);
-    sendWs('connection:response', {
-      requestId: req.requestId,
-      fromDeviceId: profile.deviceId,
-      toDeviceId: req.fromDeviceId,
-      accepted: false,
-      reason: 'User declined connection.',
-    });
+
+    setConnectionStates((prev) => ({ ...prev, [req.fromDeviceId]: 'disconnected' }));
+    setDevices((prev) =>
+      prev.map((d) =>
+        d.deviceId === req.fromDeviceId
+          ? { ...d, connectionState: 'disconnected', status: 'rejected' }
+          : d
+      )
+    );
+
     setPendingConnectionRequest(null);
+    addToast({
+      title: 'Connection Rejected',
+      message: `Declined connection request from ${req.fromDeviceName}.`,
+      type: 'info',
+    });
   };
 
   const dismissPendingRequest = () => {
@@ -1229,11 +895,14 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const disconnectDevice = (targetDeviceId: string) => {
     webrtcRef.current?.disconnect(targetDeviceId);
-    sendWs('connection:disconnect', {
-      targetDeviceId,
-      fromDeviceId: profile.deviceId,
-    });
     setConnectionStates((prev) => ({ ...prev, [targetDeviceId]: 'disconnected' }));
+    setDevices((prev) =>
+      prev.map((d) =>
+        d.deviceId === targetDeviceId
+          ? { ...d, connectionState: 'disconnected' }
+          : d
+      )
+    );
     addToast({
       title: 'Disconnected',
       message: 'Connection closed.',
@@ -1251,6 +920,17 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     text: string,
     fileData?: { name: string; size: number; type: string; dataUrl?: string }
   ): Promise<ChatMessage | null> => {
+    // Check if connected
+    const isConn = connectionStates[receiverId] === 'connected' || webrtcRef.current?.isPeerConnected(receiverId);
+    if (!isConn) {
+      addToast({
+        title: 'Not Connected',
+        message: 'Device is not connected. Please request connection first.',
+        type: 'warning',
+      });
+      return null;
+    }
+
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -1272,10 +952,10 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         : undefined,
     };
 
-    // Save locally in IndexedDB
+    // 1. Save locally in IndexedDB
     await LocalDB.saveMessage(msg);
 
-    // Update conversation in IndexedDB
+    // 2. Update conversation
     const targetDev = devices.find((d) => d.deviceId === receiverId);
     const updatedConv: Conversation = {
       id: receiverId,
@@ -1291,21 +971,14 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return [updatedConv, ...rest];
     });
 
-    // 1. Send via WebRTC P2P DataChannel
-    const sentP2P = webrtcRef.current?.sendMessage(receiverId, msg);
-
-    // 2. Fallback to WebSocket if available and P2P not open
-    if (!sentP2P) {
-      sendWs('chat:message', {
-        id: msg.id,
-        conversationId: receiverId,
-        senderId: profile.deviceId,
-        senderName: profile.deviceName,
-        receiverId,
-        text,
-        timestamp: msg.timestamp,
-        fileAttachment: msg.fileAttachment,
-      });
+    // 3. Send over WebRTC DataChannel
+    const sent = webrtcRef.current?.sendMessage(receiverId, msg);
+    if (sent) {
+      msg.status = 'sent';
+      await LocalDB.updateMessageStatus(msg.id, 'sent');
+    } else {
+      msg.status = 'failed';
+      await LocalDB.updateMessageStatus(msg.id, 'failed');
     }
 
     return msg;
@@ -1313,17 +986,14 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const sendTyping = (receiverId: string, isTyping: boolean) => {
     webrtcRef.current?.sendTyping(receiverId, isTyping);
-    sendWs('chat:typing', {
-      senderId: profile.deviceId,
-      receiverId,
-      isTyping,
-    });
   };
 
   const markConversationRead = async (deviceId: string) => {
     setConversations((prev) =>
       prev.map((c) => (c.deviceId === deviceId ? { ...c, unreadCount: 0 } : c))
     );
+    await LocalDB.markConversationMessagesRead(deviceId);
+    webrtcRef.current?.sendReadReceipt(deviceId, deviceId);
   };
 
   const deleteMessage = async (messageId: string, conversationId: string) => {
@@ -1354,10 +1024,20 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   };
 
-  // High-Speed Direct WebRTC File Transfer Implementation (Chunked binary streaming with backpressure)
+  // High-Speed Direct WebRTC File Transfer
   const sendFile = async (receiverId: string, file: File): Promise<string | null> => {
+    const isConn = connectionStates[receiverId] === 'connected' || webrtcRef.current?.isPeerConnected(receiverId);
+    if (!isConn) {
+      addToast({
+        title: 'Not Connected',
+        message: 'Device is not connected. Connect first before sending files.',
+        type: 'warning',
+      });
+      return null;
+    }
+
     const transferId = `trans_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+    const totalChunks = Math.max(1, Math.ceil(file.size / (64 * 1024)));
     const targetDev = devices.find((d) => d.deviceId === receiverId);
 
     const newTransfer: FileTransfer = {
@@ -1380,44 +1060,32 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     await LocalDB.saveTransfer(newTransfer);
     setTransfers((prev) => [newTransfer, ...prev]);
 
-    try {
-      // 1. Send directly via WebRTC DataChannel streaming with backpressure
-      if (webrtcRef.current) {
-        await webrtcRef.current.sendFile(receiverId, file, transferId, (progress) => {
-          setTransfers((prev) =>
-            prev.map((t) => (t.id === transferId ? { ...t, ...progress } : t))
-          );
-        });
-
-        newTransfer.status = 'completed';
-        newTransfer.bytesTransferred = file.size;
-        newTransfer.completedChunks = totalChunks;
-        await LocalDB.saveTransfer(newTransfer);
-        setTransfers((prev) => prev.map((t) => (t.id === transferId ? newTransfer : t)));
+    // Send in background
+    webrtcRef.current
+      ?.sendFile(receiverId, file, transferId, (progress) => {
+        setTransfers((prev) =>
+          prev.map((t) => (t.id === transferId ? ({ ...t, ...progress } as FileTransfer) : t))
+        );
+      })
+      .then(() => {
         sound.playSuccessSound();
         addToast({
           title: 'Transfer Completed',
-          message: `Sent "${file.name}" successfully via direct WebRTC.`,
+          message: `Sent "${file.name}" successfully.`,
           type: 'success',
         });
-        return transferId;
-      }
-    } catch (err: any) {
-      console.warn('[P2P] WebRTC sendFile fallback:', err);
-    }
-
-    // Fallback: Optional Local Node server upload if configured
-    sendWs('transfer:offer', {
-      transferId,
-      senderId: profile.deviceId,
-      senderName: profile.deviceName,
-      receiverId,
-      fileName: file.name,
-      fileSize: file.size,
-      fileType: file.type,
-      totalChunks,
-      timestamp: Date.now(),
-    });
+      })
+      .catch((err) => {
+        console.error('File send error:', err);
+        setTransfers((prev) =>
+          prev.map((t) => (t.id === transferId ? { ...t, status: 'failed', error: err.message } : t))
+        );
+        addToast({
+          title: 'Transfer Failed',
+          message: `Failed to send "${file.name}".`,
+          type: 'error',
+        });
+      });
 
     return transferId;
   };
@@ -1426,10 +1094,6 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setTransfers((prev) =>
       prev.map((t) => (t.id === transferId ? { ...t, status: 'cancelled' } : t))
     );
-    await LocalDB.saveTransfer({
-      id: transferId,
-      status: 'cancelled',
-    } as any);
   };
 
   const clearTransfersHistory = async () => {
@@ -1437,32 +1101,30 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setTransfers([]);
     addToast({
       title: 'Transfers Cleared',
-      message: 'Transfer history removed.',
+      message: 'Transfer history cleared.',
       type: 'info',
     });
   };
 
-  // Clipboard Sharing
+  // Clipboard Actions
   const shareClipboard = async (receiverId: string, text: string): Promise<boolean> => {
     if (!settings.allowClipboardSharing) {
       addToast({
-        title: 'Clipboard Sharing Disabled',
+        title: 'Clipboard Disabled',
         message: 'Enable clipboard sharing in Settings > Privacy first.',
         type: 'warning',
       });
       return false;
     }
 
-    const sentP2P = webrtcRef.current?.shareClipboard(receiverId, text);
-    if (!sentP2P) {
-      sendWs('clipboard:share', {
-        id: `clip_${Date.now()}`,
-        senderId: profile.deviceId,
-        senderName: profile.deviceName,
-        receiverId,
-        text,
-        timestamp: Date.now(),
+    const sent = webrtcRef.current?.shareClipboard(receiverId, text);
+    if (!sent) {
+      addToast({
+        title: 'Not Connected',
+        message: 'Connect to peer to send clipboard text.',
+        type: 'warning',
       });
+      return false;
     }
 
     addToast({
@@ -1515,6 +1177,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         connectionStates,
         toggleTrustDevice,
         toggleBlockDevice,
+        deleteSavedDevice,
         requestConnection,
         connectByCode,
         connectByQr,
@@ -1532,6 +1195,7 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         closeServerModal,
         customServiceUrl: customServiceUrlState,
         setCustomServiceUrl,
+        getDiagnostics,
         conversations,
         getConversationMessages,
         sendMessage,

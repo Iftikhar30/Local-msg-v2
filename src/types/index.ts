@@ -1,21 +1,26 @@
 export type DeviceType = 'desktop' | 'laptop' | 'phone' | 'tablet';
 
+export type DeviceApprovalStatus = 'pending' | 'accepted' | 'rejected' | 'blocked';
+export type DeviceConnectionState = 'discovered' | 'requested' | 'connecting' | 'connected' | 'disconnected';
+
 export interface Device {
   deviceId: string;
   deviceName: string;
   deviceType: DeviceType;
-  os: string;
-  ip: string;
-  port: number;
+  os?: string;
+  ip?: string;
+  port?: number;
   lastSeen: number;
   isOnline: boolean;
   avatar?: string;
   deviceCode?: string;
-  version: string;
+  version?: string;
   isSelf?: boolean;
   isTrusted?: boolean;
   isBlocked?: boolean;
-  connectionState?: 'disconnected' | 'connecting' | 'connected' | 'requested';
+  status?: DeviceApprovalStatus;
+  connectionState?: DeviceConnectionState;
+  addedAt?: number;
 }
 
 export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
@@ -152,4 +157,22 @@ export interface NetworkDiagnosticsData {
   udpDiscoveryActive: boolean;
   latencyMs: number;
   wsConnected: boolean;
+}
+
+export interface WebRTCDiagnostics {
+  localDeviceId: string;
+  localDeviceCode: string;
+  signalingConnected: boolean;
+  connectedPeerCount: number;
+  activePeers: {
+    deviceId: string;
+    deviceName: string;
+    connectionState: string;
+    iceState: string;
+    dataChannelState: string;
+    rttMs: number;
+  }[];
+  lastMessageSent?: { id: string; to: string; time: number; status: string };
+  lastMessageReceived?: { id: string; from: string; time: number };
+  lastAckReceived?: { id: string; status: string; time: number };
 }

@@ -21,6 +21,9 @@ import {
   Smartphone,
   Tablet,
   Monitor,
+  Radio,
+  Unplug,
+  RefreshCw,
 } from 'lucide-react';
 import { useLocalLink } from '../context/LocalLinkContext';
 import { useTheme } from '../context/ThemeContext';
@@ -35,6 +38,9 @@ export const ChatPage: React.FC = () => {
   const {
     profile,
     devices,
+    connectionStates,
+    requestConnection,
+    disconnectDevice,
     getConversationMessages,
     sendMessage,
     sendTyping,
@@ -68,7 +74,11 @@ export const ChatPage: React.FC = () => {
 
   const targetDevice = devices.find((d) => d.deviceId === deviceId);
   const peerName = targetDevice?.deviceName || 'Peer Device';
-  const isOnline = targetDevice?.isOnline ?? false;
+  const cState = (deviceId && connectionStates[deviceId]) || targetDevice?.connectionState || 'disconnected';
+  const isConnected = cState === 'connected';
+  const isRequested = cState === 'requested';
+  const isConnecting = cState === 'connecting';
+  const isOnline = isConnected || (targetDevice?.isOnline ?? false);
   const isPeerTyping = !!deviceId && !!typingMap[deviceId];
 
   // Load conversation messages from IndexedDB
@@ -80,9 +90,20 @@ export const ChatPage: React.FC = () => {
 
   useEffect(() => {
     loadMessages();
-    if (deviceId) {
+    if (deviceId && isConnected) {
       markConversationRead(deviceId);
     }
+  }, [deviceId, isConnected]);
+
+  // Periodic poll for new messages in current conversation from DB
+  useEffect(() => {
+    if (!deviceId) return;
+    const interval = setInterval(() => {
+      getConversationMessages(deviceId).then((msgs) => {
+        setMessages(msgs);
+      });
+    }, 1500);
+    return () => clearInterval(interval);
   }, [deviceId]);
 
   // Scroll to bottom on new messages
@@ -93,7 +114,7 @@ export const ChatPage: React.FC = () => {
   // Handle typing debounce
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInputText(e.target.value);
-    if (!deviceId) return;
+    if (!deviceId || !isConnected) return;
 
     if (!isTypingLocal) {
       setIsTypingLocal(true);
@@ -112,6 +133,15 @@ export const ChatPage: React.FC = () => {
     if (e) e.preventDefault();
     if (!inputText.trim() || !deviceId) return;
 
+    if (!isConnected) {
+      addToast({
+        title: 'Not Connected',
+        message: 'Device is not connected. Please request connection first.',
+        type: 'warning',
+      });
+      return;
+    }
+
     const text = inputText.trim();
     setInputText('');
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -125,9 +155,18 @@ export const ChatPage: React.FC = () => {
   };
 
   // Handle Image Upload & Preview in Chat
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !deviceId) return;
+
+    if (!isConnected) {
+      addToast({
+        title: 'Not Connected',
+        message: 'Connect with device before sending images.',
+        type: 'warning',
+      });
+      return;
+    }
 
     if (!file.type.startsWith('image/')) {
       addToast({ title: 'Invalid File', message: 'Please select an image file.', type: 'warning' });
@@ -156,10 +195,19 @@ export const ChatPage: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file || !deviceId) return;
 
+    if (!isConnected) {
+      addToast({
+        title: 'Not Connected',
+        message: 'Connect with device before transferring files.',
+        type: 'warning',
+      });
+      return;
+    }
+
     await sendFile(deviceId, file);
     addToast({
       title: 'File Queued',
-      message: `Sending "${file.name}" to ${peerName}`,
+      message: `Streaming "${file.name}" to ${peerName} via WebRTC DataChannel`,
       type: 'info',
     });
     navigate('/transfers');
@@ -175,12 +223,8 @@ export const ChatPage: React.FC = () => {
   // Share clipboard snippet directly
   const handleShareClipboard = () => {
     if (!deviceId) return;
-    if (!settings.allowClipboardSharing) {
-      addToast({
-        title: 'Clipboard Sharing Disabled',
-        message: 'Enable clipboard sharing in Settings > Privacy first.',
-        type: 'warning',
-      });
+    if (!isConnected) {
+      addToast({ title: 'Not Connected', message: 'Connect to peer first.', type: 'warning' });
       return;
     }
 
@@ -255,19 +299,20 @@ export const ChatPage: React.FC = () => {
               <h2 className="text-sm font-bold text-inherit truncate max-w-[200px] sm:max-w-xs">
                 {peerName}
               </h2>
+              {targetDevice?.deviceCode && (
+                <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/20">
+                  #{targetDevice.deviceCode}
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-1.5 text-[11px]">
-              <span className={`inline-block w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500' : 'bg-neutral-500'}`} />
-              <span className={isOnline ? 'text-emerald-500 font-medium' : 'text-neutral-500'}>
-                {isOnline ? 'Online' : 'Offline'}
+              <span className={`inline-block w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-neutral-500'}`} />
+              <span className={isConnected ? 'text-emerald-500 font-medium' : 'text-neutral-500'}>
+                {isConnected ? 'Connected' : isRequested ? 'Permission Requested' : isConnecting ? 'Connecting...' : 'Not Connected'}
               </span>
-              {targetDevice?.ip && (
-                <>
-                  <span className="text-neutral-500">·</span>
-                  <span className="text-neutral-400 font-mono tabular-nums">{targetDevice.ip}</span>
-                </>
-              )}
+              <span className="text-neutral-500">·</span>
+              <span className="text-neutral-400 font-mono tabular-nums">{targetDevice?.ip || 'WebRTC'}</span>
             </div>
           </div>
         </div>
@@ -286,7 +331,8 @@ export const ChatPage: React.FC = () => {
 
           <button
             onClick={handleShareClipboard}
-            className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+            disabled={!isConnected}
+            className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 disabled:opacity-30 transition-colors"
             title="Send clipboard text"
           >
             <Clipboard className="w-4 h-4" />
@@ -309,6 +355,10 @@ export const ChatPage: React.FC = () => {
                 <button
                   onClick={() => {
                     setShowMenu(false);
+                    if (!isConnected) {
+                      addToast({ title: 'Not Connected', message: 'Connect first.', type: 'warning' });
+                      return;
+                    }
                     fileInputRef.current?.click();
                   }}
                   className="w-full text-left px-3.5 py-2 text-xs text-neutral-300 hover:bg-neutral-800 flex items-center gap-2"
@@ -316,6 +366,19 @@ export const ChatPage: React.FC = () => {
                   <Paperclip className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Send File</span>
                 </button>
+
+                {isConnected && deviceId && (
+                  <button
+                    onClick={() => {
+                      setShowMenu(false);
+                      disconnectDevice(deviceId);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-amber-400 hover:bg-neutral-800 flex items-center gap-2"
+                  >
+                    <Unplug className="w-3.5 h-3.5" />
+                    <span>Disconnect</span>
+                  </button>
+                )}
 
                 <button
                   onClick={() => {
@@ -332,6 +395,33 @@ export const ChatPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* CONNECTION CHECK WARNING BANNER (Requirement #19) */}
+      {!isConnected && (
+        <div className={`px-4 py-2.5 border-b flex items-center justify-between gap-3 text-xs ${
+          isDark ? 'bg-neutral-900/90 border-neutral-800 text-neutral-300' : 'bg-neutral-100 border-neutral-200 text-neutral-700'
+        }`}>
+          <div className="flex items-center gap-2">
+            <Radio className="w-4 h-4 text-amber-500 animate-pulse" />
+            <span>
+              {isRequested
+                ? 'Connection request sent. Waiting for peer permission...'
+                : isConnecting
+                ? 'Negotiating WebRTC DataChannel connection...'
+                : 'Device is not connected.'}
+            </span>
+          </div>
+
+          {deviceId && !isRequested && !isConnecting && (
+            <button
+              onClick={() => requestConnection(deviceId)}
+              className="px-3 py-1 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+            >
+              Request Connection
+            </button>
+          )}
+        </div>
+      )}
 
       {/* SEARCH BAR (COLLAPSIBLE) */}
       {showSearch && (
@@ -355,40 +445,38 @@ export const ChatPage: React.FC = () => {
         </div>
       )}
 
-      {/* MESSAGE STREAM */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
+      {/* MESSAGES BODY */}
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
         {filteredMessages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-neutral-500">
-            <div className="w-12 h-12 rounded-2xl bg-neutral-800/60 border border-neutral-700/80 flex items-center justify-center text-neutral-400 mb-3">
-              <Laptop className="w-6 h-6 text-emerald-500" />
+          <div className="h-full flex flex-col items-center justify-center text-center p-8 opacity-60">
+            <div className="w-12 h-12 rounded-2xl bg-neutral-800 flex items-center justify-center text-neutral-400 mb-3">
+              <Laptop className="w-6 h-6" />
             </div>
-            <p className="text-xs font-semibold text-neutral-300">Direct LAN Chat with {peerName}</p>
-            <p className="text-[11px] text-neutral-500 mt-1 max-w-xs">
-              Messages and files travel instantly across your local Wi-Fi network without leaving your premises.
+            <h4 className="text-sm font-semibold text-inherit">Direct Peer-to-Peer Chat</h4>
+            <p className="text-xs max-w-xs text-neutral-400 mt-1">
+              Messages and files are transmitted directly via WebRTC DataChannel. No cloud storage, no logs.
             </p>
           </div>
         ) : (
           filteredMessages.map((msg) => {
             const isMe = msg.senderId === profile.deviceId;
-
             return (
               <div
                 key={msg.id}
                 className={`flex flex-col group ${isMe ? 'items-end' : 'items-start'}`}
               >
                 <div
-                  className={`relative max-w-[85%] sm:max-w-md rounded-2xl p-3.5 text-xs shadow-sm transition-all ${
+                  className={`max-w-[85%] sm:max-w-[70%] rounded-2xl p-3 sm:p-3.5 shadow-sm text-xs sm:text-sm relative break-words ${
                     isMe
                       ? 'bg-emerald-600 text-white rounded-br-xs'
                       : isDark
-                      ? 'bg-neutral-900 border border-neutral-800 text-neutral-100 rounded-bl-xs'
-                      : 'bg-white border border-neutral-200 text-neutral-900 rounded-bl-xs'
+                      ? 'bg-neutral-800 text-neutral-100 rounded-bl-xs'
+                      : 'bg-neutral-200 text-neutral-900 rounded-bl-xs'
                   }`}
                 >
-                  {/* Image Attachment Preview */}
+                  {/* Attached Image */}
                   {msg.fileAttachment?.dataUrl && (
                     <div
-                      className="mb-2 rounded-xl overflow-hidden cursor-pointer border border-black/10 max-h-60"
                       onClick={() =>
                         setPreviewImage({
                           url: msg.fileAttachment!.dataUrl!,
@@ -396,37 +484,23 @@ export const ChatPage: React.FC = () => {
                           size: msg.fileAttachment!.size,
                         })
                       }
+                      className="mb-2 rounded-xl overflow-hidden cursor-pointer max-h-60 bg-black/20"
                     >
                       <img
                         src={msg.fileAttachment.dataUrl}
                         alt={msg.fileAttachment.name}
-                        className="w-full h-full object-cover hover:scale-105 transition-transform duration-200"
+                        className="w-full h-full object-cover hover:scale-105 transition-transform"
                       />
                     </div>
                   )}
 
-                  {/* Regular Text */}
-                  {msg.text && (
-                    <p className="whitespace-pre-wrap break-words leading-relaxed">{msg.text}</p>
-                  )}
+                  {/* Text Content */}
+                  {msg.text && <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>}
 
-                  {/* File Metadata (non-image) */}
-                  {msg.fileAttachment && !msg.fileAttachment.dataUrl && (
-                    <div className="flex items-center gap-2 p-2 rounded-lg bg-black/10 mt-1">
-                      <FileText className="w-4 h-4 shrink-0" />
-                      <div className="min-w-0 flex-1 text-[11px]">
-                        <div className="truncate font-semibold">{msg.fileAttachment.name}</div>
-                        <div className="opacity-75 font-mono tabular-nums">
-                          {(msg.fileAttachment.size / 1024).toFixed(1)} KB
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Message Footer: Timestamp & Delivery Status */}
+                  {/* Metadata: Time and Delivery Status */}
                   <div
-                    className={`mt-1.5 flex items-center justify-end gap-1.5 text-[10px] tabular-nums ${
-                      isMe ? 'text-emerald-100/80' : 'text-neutral-400'
+                    className={`flex items-center justify-end gap-1 mt-1 text-[10px] tabular-nums ${
+                      isMe ? 'text-emerald-200' : 'text-neutral-400'
                     }`}
                   >
                     <span>
@@ -435,28 +509,19 @@ export const ChatPage: React.FC = () => {
                     {isMe && getStatusIcon(msg.status)}
                   </div>
 
-                  {/* Hover Quick Actions */}
-                  <div
-                    className={`absolute top-0 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-neutral-900 border border-neutral-800 rounded-lg p-0.5 shadow-lg ${
-                      isMe ? 'right-2' : 'left-2'
-                    }`}
-                  >
+                  {/* Action overlay on hover */}
+                  <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity flex items-center bg-neutral-900/80 rounded-md px-1 py-0.5">
                     {msg.text && (
                       <button
                         onClick={() => handleCopyMessage(msg.text)}
                         className="p-1 text-neutral-400 hover:text-white"
-                        title="Copy message"
+                        title="Copy text"
                       >
                         <Copy className="w-3 h-3" />
                       </button>
                     )}
                     <button
-                      onClick={async () => {
-                        if (deviceId) {
-                          await deleteMessage(msg.id, deviceId);
-                          setMessages((prev) => prev.filter((m) => m.id !== msg.id));
-                        }
-                      }}
+                      onClick={() => deleteMessage(msg.id, deviceId!)}
                       className="p-1 text-neutral-400 hover:text-rose-400"
                       title="Delete message"
                     >
@@ -503,8 +568,9 @@ export const ChatPage: React.FC = () => {
           {/* Image Picker */}
           <button
             type="button"
+            disabled={!isConnected}
             onClick={() => imageInputRef.current?.click()}
-            className="p-2.5 rounded-xl text-neutral-400 hover:text-white hover:bg-neutral-800/80 transition-colors"
+            className="p-2.5 rounded-xl text-neutral-400 hover:text-white hover:bg-neutral-800/80 disabled:opacity-30 transition-colors"
             title="Attach image"
           >
             <Image className="w-5 h-5" />
@@ -513,8 +579,9 @@ export const ChatPage: React.FC = () => {
           {/* File Picker */}
           <button
             type="button"
+            disabled={!isConnected}
             onClick={() => fileInputRef.current?.click()}
-            className="p-2.5 rounded-xl text-neutral-400 hover:text-white hover:bg-neutral-800/80 transition-colors"
+            className="p-2.5 rounded-xl text-neutral-400 hover:text-white hover:bg-neutral-800/80 disabled:opacity-30 transition-colors"
             title="Send large file"
           >
             <Paperclip className="w-5 h-5" />
@@ -523,10 +590,11 @@ export const ChatPage: React.FC = () => {
           {/* Text Input */}
           <input
             type="text"
-            placeholder="Type a message..."
+            placeholder={isConnected ? 'Type a message...' : 'Connect to device to start chatting...'}
             value={inputText}
             onChange={handleInputChange}
-            className={`flex-1 px-4 py-2.5 rounded-xl text-xs sm:text-sm border outline-none transition-colors ${
+            disabled={!isConnected}
+            className={`flex-1 px-4 py-2.5 rounded-xl text-xs sm:text-sm border outline-none transition-colors disabled:opacity-50 ${
               isDark
                 ? 'bg-neutral-950 border-neutral-800 text-white placeholder-neutral-500 focus:border-emerald-500'
                 : 'bg-neutral-50 border-neutral-200 text-neutral-900 placeholder-neutral-400 focus:border-emerald-500'
@@ -536,8 +604,8 @@ export const ChatPage: React.FC = () => {
           {/* Send Button */}
           <button
             type="submit"
-            disabled={!inputText.trim()}
-            className="p-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition-colors shadow-sm"
+            disabled={!inputText.trim() || !isConnected}
+            className="p-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition-colors shadow-sm cursor-pointer"
           >
             <Send className="w-5 h-5" />
           </button>

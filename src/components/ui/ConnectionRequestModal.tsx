@@ -25,7 +25,7 @@ export const ConnectionRequestModal: React.FC = () => {
       <div className="relative w-full max-w-sm bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-2xl text-neutral-100 animate-in zoom-in-95 duration-200">
         <div className="text-center">
           <div className="w-16 h-16 mx-auto rounded-2xl bg-neutral-800 border border-neutral-700/80 flex items-center justify-center shadow-inner mb-4">
-            {getDeviceIcon(pendingConnectionRequest.fromDeviceType)}
+            {getDeviceIcon(pendingConnectionRequest.fromDeviceType || 'laptop')}
           </div>
 
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-medium mb-3">

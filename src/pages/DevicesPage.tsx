@@ -19,6 +19,10 @@ import {
   Plus,
   QrCode,
   KeyRound,
+  Trash2,
+  Clock,
+  XCircle,
+  HelpCircle,
 } from 'lucide-react';
 import { useLocalLink } from '../context/LocalLinkContext';
 import { useTheme } from '../context/ThemeContext';
@@ -35,11 +39,13 @@ export const DevicesPage: React.FC = () => {
     disconnectDevice,
     toggleTrustDevice,
     toggleBlockDevice,
+    deleteSavedDevice,
     scanDevices,
     openConnectModal,
     profile,
     networkInfo,
     latencyMs,
+    getDiagnostics,
   } = useLocalLink();
 
   const { isDark } = useTheme();
@@ -52,7 +58,7 @@ export const DevicesPage: React.FC = () => {
     setTimeout(() => setIsScanning(false), 800);
   };
 
-  const getDeviceIcon = (type: string) => {
+  const getDeviceIcon = (type?: string) => {
     switch (type) {
       case 'phone':
         return <Smartphone className="w-5 h-5" />;
@@ -65,8 +71,8 @@ export const DevicesPage: React.FC = () => {
     }
   };
 
-  // Exclude self from peer list
   const peerDevices = devices.filter((d) => !d.isSelf);
+  const diagnostics = getDiagnostics();
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
@@ -77,7 +83,7 @@ export const DevicesPage: React.FC = () => {
             LAN Devices
           </h1>
           <p className={`text-xs sm:text-sm ${isDark ? 'text-neutral-400' : 'text-neutral-600'}`}>
-            Devices connected to your Wi-Fi network running LocalLink are automatically discovered.
+            Devices active on your local Wi-Fi. Peer permission is required before direct P2P connection.
           </p>
         </div>
 
@@ -126,11 +132,11 @@ export const DevicesPage: React.FC = () => {
             <Radio className="w-8 h-8 animate-pulse text-emerald-500" />
           </div>
 
-          <h3 className="text-base font-semibold text-inherit">No devices found</h3>
+          <h3 className="text-base font-semibold text-inherit">No devices discovered yet</h3>
           <p className={`text-xs max-w-md mx-auto mt-2 leading-relaxed ${
             isDark ? 'text-neutral-400' : 'text-neutral-600'
           }`}>
-            Make sure another phone, laptop, or tablet is connected to the same Wi-Fi network and LocalLink is running on it.
+            Open LocalLink on another phone, laptop, or tablet on the same Wi-Fi, or enter their 4-digit code.
           </p>
 
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
@@ -138,7 +144,7 @@ export const DevicesPage: React.FC = () => {
               onClick={() => openConnectModal('code')}
               className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors shadow-md shadow-emerald-950"
             >
-              + Connect by Code or QR
+              + Enter 4-Digit Code
             </button>
             <button
               onClick={handleScan}
@@ -153,8 +159,11 @@ export const DevicesPage: React.FC = () => {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {peerDevices.map((device) => {
-            const isConn = connectionStates[device.deviceId] === 'connected';
-            const isReq = connectionStates[device.deviceId] === 'requested';
+            const cState = connectionStates[device.deviceId] || device.connectionState || 'disconnected';
+            const isConn = cState === 'connected';
+            const isReq = cState === 'requested';
+            const isConnecting = cState === 'connecting';
+            const isRejected = device.status === 'rejected';
             const isTrusted = trustedDeviceIds.includes(device.deviceId);
             const isBlocked = blockedDeviceIds.includes(device.deviceId);
 
@@ -166,7 +175,7 @@ export const DevicesPage: React.FC = () => {
                 } ${isBlocked ? 'opacity-60' : ''}`}
               >
                 <div>
-                  {/* Top row: Icon, Name, Online status */}
+                  {/* Top row: Icon, Name, Precise Status */}
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-3 min-w-0">
                       <div className="w-12 h-12 rounded-xl bg-neutral-800 border border-neutral-700/80 flex items-center justify-center text-emerald-400 shrink-0">
@@ -185,46 +194,63 @@ export const DevicesPage: React.FC = () => {
                           )}
                         </div>
 
-                        {/* Unboxed metadata per anti-pill rule */}
                         <div className="text-[11px] text-neutral-400 flex items-center gap-1.5 mt-0.5 font-mono tabular-nums">
-                          <span>{device.ip}</span>
+                          <span>{device.ip || 'LAN'}</span>
                           <span aria-hidden="true">·</span>
-                          <span>{device.os || 'LAN'}</span>
+                          <span>{device.os || 'Browser'}</span>
                           <span aria-hidden="true">·</span>
-                          <span>LocalLink {device.version || '1.0'}</span>
+                          <span>P2P</span>
                         </div>
                       </div>
                     </div>
 
-                    {/* Status Dot */}
-                    <div className="flex items-center gap-1.5 shrink-0 text-[11px]">
-                      <span className={`inline-block w-2 h-2 rounded-full ${
-                        device.isOnline ? 'bg-emerald-500' : 'bg-neutral-500'
-                      }`} />
-                      <span className={device.isOnline ? 'text-emerald-500 font-medium' : 'text-neutral-500'}>
-                        {device.isOnline ? 'Online' : 'Offline'}
-                      </span>
+                    {/* Status Badge (Discovered ≠ Requested ≠ Connected) */}
+                    <div className="shrink-0 text-[11px] flex items-center gap-1.5">
+                      {isConn ? (
+                        <span className="flex items-center gap-1 text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                          Connected
+                        </span>
+                      ) : isReq ? (
+                        <span className="flex items-center gap-1 text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                          <Clock className="w-3 h-3 animate-spin" />
+                          Waiting for permission
+                        </span>
+                      ) : isConnecting ? (
+                        <span className="flex items-center gap-1 text-sky-400 font-semibold bg-sky-500/10 px-2 py-0.5 rounded-full border border-sky-500/20">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          Connecting...
+                        </span>
+                      ) : isRejected ? (
+                        <span className="flex items-center gap-1 text-rose-400 font-semibold bg-rose-500/10 px-2 py-0.5 rounded-full border border-rose-500/20">
+                          <XCircle className="w-3 h-3" />
+                          Connection rejected
+                        </span>
+                      ) : device.isOnline ? (
+                        <span className="flex items-center gap-1 text-neutral-400 font-medium bg-neutral-800 px-2 py-0.5 rounded-full border border-neutral-700">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                          Discovered
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1 text-neutral-500 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-neutral-600"></span>
+                          Offline
+                        </span>
+                      )}
                     </div>
                   </div>
 
                   {/* Badges / Trust Info */}
                   <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-                    {isConn && (
-                      <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md">
-                        <Check className="w-3.5 h-3.5" />
-                        Connected
-                      </span>
-                    )}
-
                     {isTrusted && (
-                      <span className="flex items-center gap-1 text-[11px] font-medium text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded-md">
+                      <span className="flex items-center gap-1 text-[11px] font-medium text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded-md border border-sky-500/20">
                         <ShieldCheck className="w-3.5 h-3.5" />
                         Trusted Device
                       </span>
                     )}
 
                     {isBlocked && (
-                      <span className="flex items-center gap-1 text-[11px] font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded-md">
+                      <span className="flex items-center gap-1 text-[11px] font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded-md border border-rose-500/20">
                         <ShieldAlert className="w-3.5 h-3.5" />
                         Blocked
                       </span>
@@ -266,6 +292,15 @@ export const DevicesPage: React.FC = () => {
                     >
                       {isBlocked ? 'Unblock' : 'Block'}
                     </button>
+
+                    {/* Remove from local list */}
+                    <button
+                      onClick={() => deleteSavedDevice(device.deviceId)}
+                      className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-400 hover:bg-neutral-800 transition-colors"
+                      title="Remove device from list"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -273,7 +308,7 @@ export const DevicesPage: React.FC = () => {
                       <>
                         <button
                           onClick={() => navigate(`/chats/${device.deviceId}`)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
                         >
                           <MessageSquare className="w-3.5 h-3.5" />
                           <span>Chat</span>
@@ -282,7 +317,7 @@ export const DevicesPage: React.FC = () => {
                         <button
                           onClick={() => disconnectDevice(device.deviceId)}
                           className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                          title="Disconnect"
+                          title="Disconnect WebRTC"
                         >
                           <Unplug className="w-4 h-4" />
                         </button>
@@ -290,10 +325,10 @@ export const DevicesPage: React.FC = () => {
                     ) : (
                       <button
                         onClick={() => requestConnection(device.deviceId)}
-                        disabled={isReq || !device.isOnline || isBlocked}
-                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition-colors shadow-sm"
+                        disabled={isReq || isConnecting || isBlocked}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors shadow-sm"
                       >
-                        {isReq ? 'Requested...' : 'Connect'}
+                        {isReq ? 'Requested...' : isConnecting ? 'Connecting...' : 'Connect'}
                       </button>
                     )}
                   </div>
@@ -304,7 +339,7 @@ export const DevicesPage: React.FC = () => {
         </div>
       )}
 
-      {/* ADVANCED DIAGNOSTICS TOGGLE (Requirement: Provide an advanced diagnostics section separately) */}
+      {/* ADVANCED DIAGNOSTICS & DEBUGGING SECTION (Requirement #21) */}
       <div className={`rounded-2xl border transition-all ${
         isDark ? 'bg-neutral-900/30 border-neutral-800' : 'bg-white border-neutral-200'
       }`}>
@@ -314,7 +349,7 @@ export const DevicesPage: React.FC = () => {
         >
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-emerald-500" />
-            <span>Advanced Network Diagnostics</span>
+            <span>Connection Diagnostics & Debug Info</span>
           </div>
           {showDiagnostics ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
@@ -323,47 +358,61 @@ export const DevicesPage: React.FC = () => {
           <div className="p-4 pt-0 border-t border-inherit space-y-4">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs pt-3 font-mono tabular-nums">
               <div className={`p-3 rounded-xl border ${isDark ? 'bg-neutral-950/60 border-neutral-800' : 'bg-neutral-50 border-neutral-200'}`}>
-                <div className="text-[10px] text-neutral-500">LOCAL IP</div>
-                <div className="font-semibold text-inherit mt-1">{networkInfo?.localIp || '127.0.0.1'}</div>
+                <div className="text-[10px] text-neutral-500">LOCAL DEVICE ID</div>
+                <div className="font-semibold text-inherit mt-1 truncate">{diagnostics.localDeviceId}</div>
               </div>
 
               <div className={`p-3 rounded-xl border ${isDark ? 'bg-neutral-950/60 border-neutral-800' : 'bg-neutral-50 border-neutral-200'}`}>
-                <div className="text-[10px] text-neutral-500">HOSTNAME</div>
-                <div className="font-semibold text-inherit mt-1 truncate">{networkInfo?.hostname || 'localhost'}</div>
+                <div className="text-[10px] text-neutral-500">PAIRING CODE</div>
+                <div className="font-semibold text-emerald-400 mt-1">#{diagnostics.localDeviceCode}</div>
               </div>
 
               <div className={`p-3 rounded-xl border ${isDark ? 'bg-neutral-950/60 border-neutral-800' : 'bg-neutral-50 border-neutral-200'}`}>
-                <div className="text-[10px] text-neutral-500">LATENCY</div>
-                <div className="font-semibold text-emerald-500 mt-1">{latencyMs} ms</div>
+                <div className="text-[10px] text-neutral-500">SIGNALING STATE</div>
+                <div className="font-semibold text-emerald-500 mt-1">
+                  {diagnostics.signalingConnected ? 'Active (MQTT / Mesh)' : 'Connecting'}
+                </div>
               </div>
 
               <div className={`p-3 rounded-xl border ${isDark ? 'bg-neutral-950/60 border-neutral-800' : 'bg-neutral-50 border-neutral-200'}`}>
-                <div className="text-[10px] text-neutral-500">DISCOVERY</div>
-                <div className="font-semibold text-inherit mt-1">UDP + WebSocket</div>
+                <div className="text-[10px] text-neutral-500">CONNECTED PEERS</div>
+                <div className="font-semibold text-inherit mt-1">{diagnostics.connectedPeerCount}</div>
               </div>
             </div>
 
-            {networkInfo?.interfaces && networkInfo.interfaces.length > 0 && (
+            {/* Last message & ACK logs */}
+            <div className="p-3 rounded-xl border text-xs font-mono space-y-1.5 bg-neutral-950/40 border-neutral-800 text-neutral-400">
               <div>
-                <div className="text-[11px] font-semibold text-neutral-400 mb-2">Network Interfaces</div>
-                <div className="space-y-1 text-[11px] font-mono">
-                  {networkInfo.interfaces
-                    .filter((iface) => !iface.internal)
-                    .map((iface, i) => (
-                      <div
-                        key={i}
-                        className={`flex items-center justify-between p-2 rounded-lg border ${
-                          isDark ? 'border-neutral-800/60 bg-neutral-950/40 text-neutral-300' : 'border-neutral-200 bg-neutral-50 text-neutral-700'
-                        }`}
-                      >
-                        <span className="font-medium text-emerald-500">{iface.name}</span>
-                        <span>{iface.address}</span>
-                        <span className="text-neutral-500">{iface.mac}</span>
-                      </div>
-                    ))}
-                </div>
+                <span className="text-neutral-500">Last Sent: </span>
+                {diagnostics.lastMessageSent ? (
+                  <span className="text-emerald-400">
+                    ID {diagnostics.lastMessageSent.id.slice(-6)} to {diagnostics.lastMessageSent.to.slice(-6)} ({new Date(diagnostics.lastMessageSent.time).toLocaleTimeString()})
+                  </span>
+                ) : (
+                  'None'
+                )}
               </div>
-            )}
+              <div>
+                <span className="text-neutral-500">Last Received: </span>
+                {diagnostics.lastMessageReceived ? (
+                  <span className="text-sky-400">
+                    ID {diagnostics.lastMessageReceived.id.slice(-6)} from {diagnostics.lastMessageReceived.from.slice(-6)} ({new Date(diagnostics.lastMessageReceived.time).toLocaleTimeString()})
+                  </span>
+                ) : (
+                  'None'
+                )}
+              </div>
+              <div>
+                <span className="text-neutral-500">Last ACK: </span>
+                {diagnostics.lastAckReceived ? (
+                  <span className="text-emerald-400">
+                    ID {diagnostics.lastAckReceived.id.slice(-6)} - Status: {diagnostics.lastAckReceived.status} ({new Date(diagnostics.lastAckReceived.time).toLocaleTimeString()})
+                  </span>
+                ) : (
+                  'None'
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>

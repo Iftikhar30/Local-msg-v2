@@ -1,7 +1,7 @@
-import { ChatMessage, Conversation, FileTransfer, AppNotification, UserProfile, AppSettings } from '../types';
+import { ChatMessage, Conversation, FileTransfer, AppNotification, Device, DeviceApprovalStatus, DeviceConnectionState } from '../types';
 
 const DB_NAME = 'LocalLinkDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -13,6 +13,12 @@ function getDB(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+
+      if (!db.objectStoreNames.contains('devices')) {
+        const devStore = db.createObjectStore('devices', { keyPath: 'deviceId' });
+        devStore.createIndex('lastSeen', 'lastSeen', { unique: false });
+        devStore.createIndex('status', 'status', { unique: false });
+      }
 
       if (!db.objectStoreNames.contains('conversations')) {
         const convStore = db.createObjectStore('conversations', { keyPath: 'id' });
@@ -53,6 +59,63 @@ function getDB(): Promise<IDBDatabase> {
 }
 
 export const LocalDB = {
+  // --- Devices Store ---
+  async getDevices(): Promise<Device[]> {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('devices', 'readonly');
+      const store = tx.objectStore('devices');
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  },
+
+  async saveDevice(device: Device): Promise<void> {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('devices', 'readwrite');
+      const store = tx.objectStore('devices');
+      const req = store.put(device);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  },
+
+  async deleteDevice(deviceId: string): Promise<void> {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('devices', 'readwrite');
+      const store = tx.objectStore('devices');
+      const req = store.delete(deviceId);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  },
+
+  async updateDeviceStatus(
+    deviceId: string,
+    status: DeviceApprovalStatus,
+    connectionState?: DeviceConnectionState
+  ): Promise<void> {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('devices', 'readwrite');
+      const store = tx.objectStore('devices');
+      const req = store.get(deviceId);
+      req.onsuccess = () => {
+        const dev = req.result as Device | undefined;
+        if (dev) {
+          dev.status = status;
+          if (connectionState) dev.connectionState = connectionState;
+          store.put(dev);
+        }
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  },
+
   // --- Conversations ---
   async getConversations(): Promise<Conversation[]> {
     const db = await getDB();
@@ -118,6 +181,17 @@ export const LocalDB = {
     });
   },
 
+  async hasMessage(messageId: string): Promise<boolean> {
+    const db = await getDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction('messages', 'readonly');
+      const store = tx.objectStore('messages');
+      const req = store.getKey(messageId);
+      req.onsuccess = () => resolve(!!req.result);
+      req.onerror = () => resolve(false);
+    });
+  },
+
   async saveMessage(message: ChatMessage): Promise<void> {
     const db = await getDB();
     return new Promise((resolve, reject) => {
@@ -144,6 +218,30 @@ export const LocalDB = {
         resolve();
       };
       getReq.onerror = () => reject(getReq.error);
+    });
+  },
+
+  async markConversationMessagesRead(conversationId: string): Promise<void> {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('messages', 'readwrite');
+      const store = tx.objectStore('messages');
+      const index = store.index('conversationId');
+      const req = index.openCursor(conversationId);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          const msg = cursor.value as ChatMessage;
+          if (msg.status !== 'read') {
+            msg.status = 'read';
+            cursor.update(msg);
+          }
+          cursor.continue();
+        } else {
+          resolve();
+        }
+      };
+      req.onerror = () => reject(req.error);
     });
   },
 
@@ -176,7 +274,6 @@ export const LocalDB = {
     return new Promise((resolve, reject) => {
       const tx = db.transaction('transfers', 'readwrite');
       const store = tx.objectStore('transfers');
-      // Strip blobData from indexedDB serialization if needed or keep if supported
       const req = store.put(transfer);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
@@ -329,7 +426,6 @@ export const LocalDB = {
       let chatSize = 0;
       let transfersSize = 0;
 
-      // Estimate chat size
       const msgs = await new Promise<ChatMessage[]>((res) => {
         const tx = db.transaction('messages', 'readonly');
         const store = tx.objectStore('messages');
@@ -345,7 +441,6 @@ export const LocalDB = {
         }
       }
 
-      // Estimate transfers size
       const transfers = await new Promise<FileTransfer[]>((res) => {
         const tx = db.transaction('transfers', 'readonly');
         const store = tx.objectStore('transfers');
