@@ -1,9 +1,19 @@
 import { NetworkDiagnosticsData, Device } from '../types';
 
 export const NetworkAPI = {
+  getBaseUrl(): string {
+    if (typeof window === 'undefined') return '';
+    const custom = localStorage.getItem('locallink_custom_service_url');
+    if (custom && custom.trim().length > 0) {
+      return custom.trim().replace(/\/+$/, '');
+    }
+    return '';
+  },
+
   async getNetworkInfo(): Promise<NetworkDiagnosticsData | null> {
     try {
-      const res = await fetch('/api/network/info');
+      const base = this.getBaseUrl();
+      const res = await fetch(`${base}/api/network/info`, { signal: AbortSignal.timeout(3500) });
       if (!res.ok) return null;
       const data = await res.json();
       return data.data;
@@ -14,8 +24,11 @@ export const NetworkAPI = {
 
   async getDevices(currentDeviceId?: string): Promise<Device[]> {
     try {
-      const url = currentDeviceId ? `/api/devices?deviceId=${encodeURIComponent(currentDeviceId)}` : '/api/devices';
-      const res = await fetch(url);
+      const base = this.getBaseUrl();
+      const url = currentDeviceId 
+        ? `${base}/api/devices?deviceId=${encodeURIComponent(currentDeviceId)}` 
+        : `${base}/api/devices`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(3500) });
       if (!res.ok) return [];
       const data = await res.json();
       return data.data || [];
@@ -26,7 +39,8 @@ export const NetworkAPI = {
 
   async triggerLanScan(): Promise<boolean> {
     try {
-      const res = await fetch('/api/devices/scan', { method: 'POST' });
+      const base = this.getBaseUrl();
+      const res = await fetch(`${base}/api/devices/scan`, { method: 'POST', signal: AbortSignal.timeout(4000) });
       return res.ok;
     } catch {
       return false;
@@ -43,7 +57,8 @@ export const NetworkAPI = {
     totalChunks: number;
   }): Promise<{ transferId: string; fileName: string; fileSize: number } | null> {
     try {
-      const res = await fetch('/api/transfers/init', {
+      const base = this.getBaseUrl();
+      const res = await fetch(`${base}/api/transfers/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -62,7 +77,8 @@ export const NetworkAPI = {
     chunkData: string; // base64
   }): Promise<{ completed: boolean; bytesReceived: number; percent: number } | null> {
     try {
-      const res = await fetch('/api/transfers/chunk', {
+      const base = this.getBaseUrl();
+      const res = await fetch(`${base}/api/transfers/chunk`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -76,12 +92,14 @@ export const NetworkAPI = {
   },
 
   getDownloadUrl(transferId: string): string {
-    return `/api/transfers/file/${encodeURIComponent(transferId)}`;
+    const base = this.getBaseUrl();
+    return `${base}/api/transfers/file/${encodeURIComponent(transferId)}`;
   },
 
   async getTransferStatus(transferId: string): Promise<any> {
     try {
-      const res = await fetch(`/api/transfers/status/${encodeURIComponent(transferId)}`);
+      const base = this.getBaseUrl();
+      const res = await fetch(`${base}/api/transfers/status/${encodeURIComponent(transferId)}`);
       if (!res.ok) return null;
       const json = await res.json();
       return json.data;
@@ -92,7 +110,8 @@ export const NetworkAPI = {
 
   async cancelTransfer(transferId: string): Promise<boolean> {
     try {
-      const res = await fetch(`/api/transfers/cancel/${encodeURIComponent(transferId)}`, { method: 'POST' });
+      const base = this.getBaseUrl();
+      const res = await fetch(`${base}/api/transfers/cancel/${encodeURIComponent(transferId)}`, { method: 'POST' });
       return res.ok;
     } catch {
       return false;

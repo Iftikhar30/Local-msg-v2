@@ -25,6 +25,7 @@ export const ConnectionSettingsPage: React.FC = () => {
     wsState,
     latencyMs,
     trustedDeviceIds,
+    setCustomServiceUrl,
     addToast,
   } = useLocalLink();
   const { isDark } = useTheme();
@@ -48,31 +49,27 @@ export const ConnectionSettingsPage: React.FC = () => {
 
     const clean = serviceUrl.trim().replace(/\/+$/, '');
     try {
-      const res = await fetch(`${clean}/api/network/info`, { signal: AbortSignal.timeout(4000) });
-      const data = await res.json();
-      if (data && data.success) {
+      const success = await setCustomServiceUrl(clean);
+      if (success) {
         setTestResult({
           success: true,
-          message: `Connected successfully! Server: ${data.data?.hostname || 'LocalLink'} (${data.data?.localIp || clean})`,
+          message: `Connected successfully to LocalLink service at: ${clean}`,
         });
-        localStorage.setItem('locallink_custom_service_url', clean);
         addToast({
           title: 'Service Connected',
-          message: `LocalLink service at ${clean} is online.`,
+          message: `LocalLink service at ${clean} is online and active.`,
           type: 'success',
         });
       } else {
         setTestResult({
           success: false,
-          message: 'Server responded, but payload was invalid.',
+          message: 'Could not connect. Ensure the LocalLink server is running (e.g. npm run dev) on that IP and port.',
         });
       }
     } catch (err: any) {
       setTestResult({
         success: false,
-        message: err.name === 'TimeoutError'
-          ? 'Connection timed out. Ensure the LocalLink server is running on that IP and port.'
-          : 'Could not connect. Ensure the LocalLink server is running (e.g. npm run lan) and on the same Wi-Fi.',
+        message: 'Connection failed. Ensure the server is running on the same Wi-Fi.',
       });
     } finally {
       setIsTestingService(false);

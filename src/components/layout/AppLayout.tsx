@@ -24,7 +24,8 @@ import { ToastContainer } from '../ui/Toast';
 import { ConnectionRequestModal } from '../ui/ConnectionRequestModal';
 import { ClipboardReceivedModal } from '../ui/ClipboardReceivedModal';
 import { ConnectDeviceModal } from '../ui/ConnectDeviceModal';
-import { QrCode, Plus, Download } from 'lucide-react';
+import { ConnectServerModal } from '../ui/ConnectServerModal';
+import { QrCode, Plus, Download, Server, AlertCircle } from 'lucide-react';
 
 export const AppLayout: React.FC = () => {
   const location = useLocation();
@@ -37,10 +38,19 @@ export const AppLayout: React.FC = () => {
     transfers,
     scanDevices,
     openConnectModal,
+    openServerModal,
   } = useLocalLink();
 
   const { theme, setTheme, isDark } = useTheme();
   const { isInstallable, isInstalled, triggerInstall } = usePWAInstall();
+
+  const isVercelHost =
+    typeof window !== 'undefined' &&
+    (window.location.hostname.endsWith('vercel.app') ||
+      (!['localhost', '127.0.0.1'].includes(window.location.hostname) &&
+        !window.location.hostname.startsWith('192.168.') &&
+        !window.location.hostname.startsWith('10.') &&
+        !window.location.hostname.startsWith('172.')));
 
   const totalUnreadMessages = conversations.reduce((acc, c) => acc + (c.unreadCount || 0), 0);
   const activeTransfersCount = transfers.filter((t) => t.status === 'transferring').length;
@@ -110,27 +120,34 @@ export const AppLayout: React.FC = () => {
           </div>
 
           {/* Network Status Badge */}
-          <div className={`mt-4 p-2.5 rounded-xl border flex items-center gap-2.5 ${
-            wsState === 'connected'
-              ? isDark
-                ? 'bg-emerald-950/20 border-emerald-500/20 text-emerald-300'
-                : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-              : isDark
-              ? 'bg-rose-950/20 border-rose-500/20 text-rose-300'
-              : 'bg-rose-50 border-rose-200 text-rose-800'
-          }`}>
-            <span className="relative flex h-2.5 w-2.5 shrink-0">
-              {wsState === 'connected' && (
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              )}
-              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                wsState === 'connected' ? 'bg-emerald-500' : 'bg-rose-500'
-              }`}></span>
-            </span>
-            <div className="min-w-0 text-xs truncate font-medium">
-              {wsState === 'connected' ? 'Connected to Local Network' : 'Disconnected from LAN'}
+          <button
+            onClick={openServerModal}
+            className={`w-full text-left mt-4 p-2.5 rounded-xl border flex items-center justify-between gap-2 transition-all cursor-pointer ${
+              wsState === 'connected'
+                ? isDark
+                  ? 'bg-emerald-950/20 border-emerald-500/20 text-emerald-300 hover:bg-emerald-900/30'
+                  : 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
+                : isDark
+                ? 'bg-rose-950/20 border-rose-500/20 text-rose-300 hover:bg-rose-900/30'
+                : 'bg-rose-50 border-rose-200 text-rose-800 hover:bg-rose-100'
+            }`}
+            title="Click to configure LocalLink Server connection"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                {wsState === 'connected' && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                )}
+                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                  wsState === 'connected' ? 'bg-emerald-500' : 'bg-rose-500'
+                }`}></span>
+              </span>
+              <div className="min-w-0 text-xs truncate font-medium">
+                {wsState === 'connected' ? 'Connected to Local Network' : 'Disconnected from LAN'}
+              </div>
             </div>
-          </div>
+            <Server className="w-3.5 h-3.5 opacity-60 shrink-0" />
+          </button>
         </div>
 
         {/* Navigation Links */}
@@ -196,7 +213,11 @@ export const AppLayout: React.FC = () => {
       <header className={`md:hidden flex items-center justify-between px-4 py-3 border-b sticky top-0 z-40 backdrop-blur-md ${
         isDark ? 'bg-neutral-950/90 border-neutral-800' : 'bg-white/90 border-neutral-200'
       }`}>
-        <div className="flex items-center gap-2.5">
+        <div
+          onClick={openServerModal}
+          className="flex items-center gap-2.5 cursor-pointer"
+          title="Click to configure Local Server connection"
+        >
           <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
             <Radio className="w-4 h-4 animate-pulse" />
           </div>
@@ -264,6 +285,28 @@ export const AppLayout: React.FC = () => {
 
       {/* MAIN CONTENT AREA */}
       <div className="flex-1 flex flex-col min-w-0 min-h-screen">
+        {/* Vercel Free / Remote Alert Banner when not connected to local service */}
+        {isVercelHost && wsState !== 'connected' && (
+          <div
+            onClick={openServerModal}
+            className={`flex items-center justify-between px-4 sm:px-6 py-2 border-b text-xs cursor-pointer transition-colors ${
+              isDark
+                ? 'bg-amber-950/40 border-amber-500/30 text-amber-200 hover:bg-amber-900/50'
+                : 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="truncate">
+                <strong>Vercel Free Mode:</strong> Local LAN service is offline. Click here to connect your PC or Termux LocalLink server.
+              </span>
+            </div>
+            <span className="font-bold underline shrink-0 ml-3 text-amber-400 hover:text-amber-300">
+              Connect Server
+            </span>
+          </div>
+        )}
+
         {/* Desktop Header */}
         <header className={`hidden md:flex items-center justify-between px-8 py-4 border-b ${
           isDark ? 'bg-neutral-900/20 border-neutral-800/80' : 'bg-white border-neutral-200'
@@ -420,6 +463,7 @@ export const AppLayout: React.FC = () => {
       <ConnectionRequestModal />
       <ClipboardReceivedModal />
       <ConnectDeviceModal />
+      <ConnectServerModal />
     </div>
   );
 };

@@ -67,6 +67,13 @@ interface LocalLinkContextType {
   openConnectModal: (tab?: ConnectModalTab) => void;
   closeConnectModal: () => void;
 
+  // Local Server Connection Modal (Termux / PC / Vercel Bridge)
+  isServerModalOpen: boolean;
+  openServerModal: () => void;
+  closeServerModal: () => void;
+  customServiceUrl: string;
+  setCustomServiceUrl: (url: string) => Promise<boolean>;
+
   // Chat
   conversations: Conversation[];
   getConversationMessages: (deviceId: string) => Promise<ChatMessage[]>;
@@ -164,6 +171,21 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const closeConnectModal = useCallback(() => {
     setIsConnectModalOpen(false);
+  }, []);
+
+  // Server Connection Modal State (for PC / Termux / Vercel Bridge)
+  const [isServerModalOpen, setIsServerModalOpen] = useState<boolean>(false);
+  const [customServiceUrlState, setCustomServiceUrlState] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    return localStorage.getItem('locallink_custom_service_url') || '';
+  });
+
+  const openServerModal = useCallback(() => {
+    setIsServerModalOpen(true);
+  }, []);
+
+  const closeServerModal = useCallback(() => {
+    setIsServerModalOpen(false);
   }, []);
 
   // 2. Settings State
@@ -299,8 +321,19 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
 
     setWsState('connecting');
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    // Determine target WebSocket URL (supports custom Local Server URL when on Vercel/LAN)
+    let wsUrl = '';
+    const customService = localStorage.getItem('locallink_custom_service_url');
+    if (customService && customService.trim().length > 0) {
+      const clean = customService.trim().replace(/\/+$/, '');
+      const wsProto = clean.startsWith('https:') ? 'wss:' : 'ws:';
+      const hostPart = clean.replace(/^https?:\/\//, '');
+      wsUrl = `${wsProto}//${hostPart}/ws`;
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/ws`;
+    }
 
     try {
       const socket = new WebSocket(wsUrl);
@@ -802,6 +835,41 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return next;
     });
   };
+
+  // Set Custom Server URL (for PC / Termux / Vercel Bridge)
+  const setCustomServiceUrl = useCallback(
+    async (url: string): Promise<boolean> => {
+      const clean = url.trim().replace(/\/+$/, '');
+      if (!clean) {
+        localStorage.removeItem('locallink_custom_service_url');
+        setCustomServiceUrlState('');
+        connectWebSocket();
+        refreshNetwork();
+        return true;
+      }
+
+      try {
+        const res = await fetch(`${clean}/api/network/info`, { signal: AbortSignal.timeout(3500) });
+        if (res.ok) {
+          localStorage.setItem('locallink_custom_service_url', clean);
+          setCustomServiceUrlState(clean);
+          connectWebSocket();
+          refreshNetwork();
+          return true;
+        }
+      } catch {
+        // network probe error
+      }
+
+      // Save anyway and attempt WebSocket connection
+      localStorage.setItem('locallink_custom_service_url', clean);
+      setCustomServiceUrlState(clean);
+      connectWebSocket();
+      refreshNetwork();
+      return false;
+    },
+    [connectWebSocket, refreshNetwork]
+  );
 
   // Device Discovery trigger
   const scanDevices = async () => {
@@ -1344,6 +1412,11 @@ export const LocalLinkProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         connectModalTab,
         openConnectModal,
         closeConnectModal,
+        isServerModalOpen,
+        openServerModal,
+        closeServerModal,
+        customServiceUrl: customServiceUrlState,
+        setCustomServiceUrl,
         conversations,
         getConversationMessages,
         sendMessage,
