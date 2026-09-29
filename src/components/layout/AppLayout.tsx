@@ -285,28 +285,6 @@ export const AppLayout: React.FC = () => {
 
       {/* MAIN CONTENT AREA */}
       <div className="flex-1 flex flex-col min-w-0 min-h-screen">
-        {/* Vercel Free / Remote Alert Banner when not connected to local service */}
-        {isVercelHost && wsState !== 'connected' && (
-          <div
-            onClick={openServerModal}
-            className={`flex items-center justify-between px-4 sm:px-6 py-2 border-b text-xs cursor-pointer transition-colors ${
-              isDark
-                ? 'bg-amber-950/40 border-amber-500/30 text-amber-200 hover:bg-amber-900/50'
-                : 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
-            }`}
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-              <span className="truncate">
-                <strong>Vercel Free Mode:</strong> Local LAN service is offline. Click here to connect your PC or Termux LocalLink server.
-              </span>
-            </div>
-            <span className="font-bold underline shrink-0 ml-3 text-amber-400 hover:text-amber-300">
-              Connect Server
-            </span>
-          </div>
-        )}
-
         {/* Desktop Header */}
         <header className={`hidden md:flex items-center justify-between px-8 py-4 border-b ${
           isDark ? 'bg-neutral-900/20 border-neutral-800/80' : 'bg-white border-neutral-200'

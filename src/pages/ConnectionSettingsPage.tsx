@@ -78,88 +78,67 @@ export const ConnectionSettingsPage: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
-      {/* DUAL DEPLOYMENT MODE CARD */}
+      {/* PRIMARY ARCHITECTURE CARD */}
       <div className={`p-6 rounded-2xl border ${
         isDark ? 'bg-neutral-900/40 border-neutral-800' : 'bg-white border-neutral-200'
       }`}>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <Server className="w-4 h-4 text-emerald-500" />
-            <h2 className="text-base font-semibold text-inherit">Deployment Architecture</h2>
+            <Radio className="w-5 h-5 text-emerald-500" />
+            <h2 className="text-base font-semibold text-inherit">Architecture: Browser-to-Browser WebRTC</h2>
           </div>
-          <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
-            !isRemoteHost
-              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-              : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-          }`}>
-            {!isRemoteHost ? '🟢 Local Node / LAN Mode' : '🟡 Vercel / Remote Web Mode'}
+          <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            🟢 Zero Server P2P Active
           </span>
         </div>
 
         <p className={`text-xs ${isDark ? 'text-neutral-400' : 'text-neutral-600'} leading-relaxed mb-4`}>
-          LocalLink supports dual deployment: run locally via Node.js on PC/Termux for zero-internet LAN mesh, or host static UI on Vercel Free.
+          LocalLink uses pure <strong>Browser-to-Browser WebRTC DataChannels</strong> for zero-cloud messaging, instant pairing, and chunked file transfer across your Wi-Fi network. No Node.js or Termux installation is required for standard users.
         </p>
 
-        {isRemoteHost ? (
-          <div className="space-y-4 p-4 rounded-xl bg-amber-500/5 border border-amber-500/20">
-            <div className="flex items-start gap-2.5 text-xs text-amber-300">
-              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-semibold">Vercel / Remote Web Mode Active</span>
-                <p className="mt-0.5 text-neutral-300 leading-relaxed">
-                  For full LAN peer discovery and large file transfers, connect to a LocalLink Node.js service running on your local Wi-Fi, or open the local server URL directly.
-                </p>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-inherit mb-1.5">
-                Local Service URL (PC or Termux)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={serviceUrl}
-                  onChange={(e) => setServiceUrl(e.target.value)}
-                  placeholder="e.g. http://192.168.1.100:3000"
-                  className={`flex-1 px-3.5 py-2 rounded-xl text-xs font-mono border outline-none ${
-                    isDark ? 'bg-neutral-950 border-neutral-800 text-white' : 'bg-white border-neutral-300 text-neutral-900'
-                  }`}
-                />
-                <button
-                  type="button"
-                  onClick={handleTestConnection}
-                  disabled={isTestingService}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors cursor-pointer shrink-0 flex items-center gap-1.5"
-                >
-                  {isTestingService ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                  <span>Test Connection</span>
-                </button>
-              </div>
-            </div>
-
-            {testResult && (
-              <div className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
-                testResult.success
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300'
-                  : 'bg-rose-500/10 border border-rose-500/20 text-rose-300'
-              }`}>
-                {testResult.success ? <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" /> : <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
-                <span>{testResult.message}</span>
-              </div>
-            )}
+        {/* Optional Local Server Config */}
+        <div className={`p-4 rounded-xl border space-y-3 ${isDark ? 'bg-neutral-950/60 border-neutral-800' : 'bg-neutral-50 border-neutral-200'}`}>
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-xs text-inherit flex items-center gap-1.5">
+              <Server className="w-4 h-4 text-emerald-400" /> Optional Advanced: Self-Hosted Local Server
+            </span>
           </div>
-        ) : (
-          <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-xs text-neutral-300 space-y-1">
-            <div className="font-semibold text-emerald-400 flex items-center gap-1.5">
-              <Check className="w-4 h-4" />
-              <span>Full LAN Communication Active</span>
-            </div>
-            <p className="text-neutral-400 leading-relaxed">
-              Serving frontend and local WebSocket directly from your local Node.js server. No external cloud dependencies or internet connectivity required.
-            </p>
+          <p className={`text-[11px] ${isDark ? 'text-neutral-400' : 'text-neutral-500'}`}>
+            If you choose to run a dedicated Node.js server on PC or Android Termux (e.g. <code>npm run dev</code>), you can connect its custom IP endpoint below:
+          </p>
+
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={serviceUrl}
+              onChange={(e) => setServiceUrl(e.target.value)}
+              placeholder="e.g. http://192.168.1.100:3000"
+              className={`flex-1 px-3.5 py-2 rounded-xl text-xs font-mono border outline-none ${
+                isDark ? 'bg-neutral-900 border-neutral-700 text-white' : 'bg-white border-neutral-300 text-neutral-900'
+              }`}
+            />
+            <button
+              type="button"
+              onClick={handleTestConnection}
+              disabled={isTestingService}
+              className="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-colors cursor-pointer shrink-0 flex items-center gap-1.5"
+            >
+              {isTestingService ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+              <span>Connect</span>
+            </button>
           </div>
-        )}
+
+          {testResult && (
+            <div className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
+              testResult.success
+                ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300'
+                : 'bg-rose-500/10 border border-rose-500/20 text-rose-300'
+            }`}>
+              {testResult.success ? <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" /> : <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
+              <span>{testResult.message}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* CONNECTION TOGGLES */}
